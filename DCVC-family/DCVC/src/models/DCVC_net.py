@@ -191,33 +191,164 @@ class DCVC_net(nn.Module):
         return self.mvDecoder_part2(torch.cat((mv, ref), 1)) + mv
 
     def quantize(self, inputs, mode, means=None):
-        assert(mode == "dequantize")
+        if mode == "noise":
+            half = float(0.5)
+            noise = torch.empty_like(inputs).uniform_(-half, half)
+            inputs = inputs + noise
+            return inputs
         outputs = inputs.clone()
-        outputs -= means
+        if means is not None:
+            outputs -= means
         outputs = torch.round(outputs)
-        outputs += means
+        if mode == "dequantize":
+            if means is not None:
+                outputs += means
+            return outputs
+        assert mode == "symbols", mode
+        outputs = outputs.int()
         return outputs
 
-    def feature_probs_based_sigma(self, feature, mean, sigma):
+    def feature_probs_based_sigma(self, feature, mean, sigma, training=True, bin_size=1.0, prob_clamp=1e-6):
+        """
+        A numerically stable version of the feature probability calculation based on sigma.
+
+        Args:
+            feature (Tensor): Input feature tensor
+            mean (Tensor): Mean tensor for quantization
+            sigma (Tensor): Scale parameter for Laplace distribution
+            training (bool): Whether in training mode. If True, uses "noise" quantization.
+            bin_size (float): Quantization bin size, typically 1.0
+            prob_clamp (float): Threshold for numerical stability approximation
+        """
+
+        # Ensure proper calculation precision
+        @torch.no_grad()  # We don't need gradient through the assert check
+        def check_sigma(s):
+            assert s.min() > 0, f"Invalid sigma value: {s.min()}"
+            return s
+
+        # Convert all inputs to float32 to ensure precision
+        feature = feature.float()
+        mean = mean.float() if mean is not None else mean
+        sigma = check_sigma(sigma.float())
+
+        # Apply quantization based on training mode
         outputs = self.quantize(
-            feature, "dequantize", mean
+            feature, "noise" if training else "dequantize", mean
         )
+
+        # Compute centered values
         values = outputs - mean
-        mu = torch.zeros_like(sigma)
+
+        # Clamp sigma to ensure numerical stability
         sigma = sigma.clamp(1e-5, 1e10)
-        gaussian = torch.distributions.laplace.Laplace(mu, sigma)
-        probs = gaussian.cdf(values + 0.5) - gaussian.cdf(values - 0.5)
-        total_bits = torch.sum(torch.clamp(-1.0 * torch.log(probs + 1e-5) / math.log(2.0), 0, 50))
+
+        # Create Laplace distribution with zero mean and sigma scale
+        mu = torch.zeros_like(sigma)
+        laplace_dist = torch.distributions.laplace.Laplace(mu, sigma)
+
+        # Safe log probability mass calculation
+        def safe_log_prob_mass(dist, x, bin_size, prob_clamp):
+            # Calculate probability mass: CDF(x+0.5) - CDF(x-0.5)
+            prob_mass = dist.cdf(x + 0.5 * bin_size) - dist.cdf(x - 0.5 * bin_size)
+
+            # Use approximation for numerical stability when probability mass is small
+            log_prob = torch.where(
+                prob_mass > prob_clamp,
+                torch.log(torch.clamp(prob_mass, min=1e-10)),
+                # Use log of PDF times bin size as approximation
+                # For Laplace distribution, this is a good approximation
+                dist.log_prob(x) + math.log(bin_size)
+            )
+            return log_prob, prob_mass
+
+        # Calculate log probability and probability mass
+        log_probs, probs = safe_log_prob_mass(laplace_dist, values, bin_size, prob_clamp)
+
+        # Convert from nats to bits and sum
+        total_bits = torch.sum(torch.clamp(-log_probs / math.log(2.0), 0, 50))
+
         return total_bits, probs
 
-    def iclr18_estrate_bits_z(self, z):
+    def iclr18_estrate_bits_z(self, z, prob_clamp=1e-6):
+        """
+        A numerically stable bit rate estimation function based on ICLR'18 method.
+
+        Args:
+            z (Tensor): Input tensor
+            prob_clamp (float): Threshold for numerical stability
+
+        Returns:
+            total_bits (Tensor): Estimated total bits
+            prob (Tensor): Probability mass function values
+        """
+        # Calculate probability mass function (P(z-0.5 < Z <= z+0.5))
         prob = self.bitEstimator_z(z + 0.5) - self.bitEstimator_z(z - 0.5)
-        total_bits = torch.sum(torch.clamp(-1.0 * torch.log(prob + 1e-5) / math.log(2.0), 0, 50))
+
+        # Ensure computation precision
+        prob = prob.float()
+
+        # Calculate safe log probability
+        def safe_log_prob(p, eps=1e-10):
+            # Direct log calculation when probability is above threshold
+            # Otherwise use Laplacian approximation for numerical stability
+            log_p = torch.where(
+                p > prob_clamp,
+                torch.log(torch.clamp(p, min=eps)),
+                # Using properties of Laplace distribution for approximation
+                # Laplace distribution has exponential decay in tails, so linear approximation works well
+                # This is consistent with the BitEstimator model characteristics
+                torch.log(prob_clamp) + (p - prob_clamp) / prob_clamp
+            )
+            return log_p
+
+        # Calculate information content (bits)
+        log_prob = safe_log_prob(prob)
+        bits = -log_prob / math.log(2.0)  # Convert to base-2 logarithm (bits)
+
+        # Limit extreme values to prevent gradient explosion
+        total_bits = torch.sum(torch.clamp(bits, 0, 50))
+
         return total_bits, prob
 
-    def iclr18_estrate_bits_z_mv(self, z_mv):
+    def iclr18_estrate_bits_z_mv(self, z_mv, prob_clamp=1e-6):
+        """
+        A numerically stable bit rate estimation function for motion vectors based on ICLR'18 method.
+
+        Args:
+            z_mv (Tensor): Input motion vector tensor
+            prob_clamp (float): Threshold for numerical stability
+
+        Returns:
+            total_bits (Tensor): Estimated total bits
+            prob (Tensor): Probability mass function values
+        """
+        # Calculate probability mass function (P(z_mv-0.5 < Z <= z_mv+0.5))
         prob = self.bitEstimator_z_mv(z_mv + 0.5) - self.bitEstimator_z_mv(z_mv - 0.5)
-        total_bits = torch.sum(torch.clamp(-1.0 * torch.log(prob + 1e-5) / math.log(2.0), 0, 50))
+
+        # Ensure computation precision
+        prob = prob.float()
+
+        # Calculate safe log probability
+        def safe_log_prob(p, eps=1e-10):
+            # Direct log calculation when probability is above threshold
+            # Otherwise use approximation for numerical stability
+            log_p = torch.where(
+                p > prob_clamp,
+                torch.log(torch.clamp(p, min=eps)),
+                # Using first-order Taylor expansion approximation of log around prob_clamp
+                # This is appropriate for the BitEstimator model
+                torch.log(prob_clamp) + (p - prob_clamp) / prob_clamp
+            )
+            return log_p
+
+        # Calculate information content (bits)
+        log_prob = safe_log_prob(prob)
+        bits = -log_prob / math.log(2.0)  # Convert to base-2 logarithm (bits)
+
+        # Limit extreme values to prevent gradient explosion
+        total_bits = torch.sum(torch.clamp(bits, 0, 50))
+
         return total_bits, prob
 
     def update(self, force=False):
@@ -411,14 +542,23 @@ class DCVC_net(nn.Module):
 
         return recon_image
 
-    def forward(self, referframe, input_image):
+    def forward(self, referframe, input_image,training = True):
         estmv = self.opticFlow(input_image, referframe)
         mvfeature = self.mvEncoder(estmv)
         z_mv = self.mvpriorEncoder(mvfeature)
-        compressed_z_mv = torch.round(z_mv)
+        # compressed_z_mv = torch.round(z_mv)
+        if training == True:
+            compressed_z_mv = z_mv + torch.empty_like(z_mv).uniform_(-0.5, 0.5)
+        else:
+            compressed_z_mv = torch.round(z_mv)
+
         params_mv = self.mvpriorDecoder(compressed_z_mv)
 
-        quant_mv = torch.round(mvfeature)
+        # quant_mv = torch.round(mvfeature)
+        if training == True:
+            quant_mv = mvfeature + torch.empty_like(mvfeature).uniform_(-0.5, 0.5)
+        else:
+            quant_mv = torch.round(mvfeature)
 
         ctx_params_mv = self.auto_regressive_mv(quant_mv)
         gaussian_params_mv = self.entropy_parameters_mv(
@@ -436,12 +576,20 @@ class DCVC_net(nn.Module):
 
         feature = self.contextualEncoder(torch.cat((input_image, context), dim=1))
         z = self.priorEncoder(feature)
-        compressed_z = torch.round(z)
+        # compressed_z = torch.round(z)
+        if training == True:
+            compressed_z = z + torch.empty_like(z).uniform_(-0.5, 0.5)
+        else:
+            compressed_z = torch.round(z)
         params = self.priorDecoder(compressed_z)
 
         feature_renorm = feature
 
-        compressed_y_renorm = torch.round(feature_renorm)
+        # compressed_y_renorm = torch.round(feature_renorm)
+        if training == True:
+            compressed_y_renorm = feature_renorm + torch.empty_like(feature_renorm).uniform_(-0.5, 0.5)
+        else:
+            compressed_y_renorm = torch.round(feature_renorm)
 
         ctx_params = self.auto_regressive(compressed_y_renorm)
         gaussian_params = self.entropy_parameters(
@@ -453,8 +601,8 @@ class DCVC_net(nn.Module):
         recon_image = self.contextualDecoder_part2(torch.cat((recon_image_feature, context), dim=1))
 
         total_bits_y, _ = self.feature_probs_based_sigma(
-            feature_renorm, means_hat, scales_hat)
-        total_bits_mv, _ = self.feature_probs_based_sigma(mvfeature, means_hat_mv, scales_hat_mv)
+            feature_renorm, means_hat, scales_hat,training=training)
+        total_bits_mv, _ = self.feature_probs_based_sigma(mvfeature, means_hat_mv, scales_hat_mv,training=training)
         total_bits_z, _ = self.iclr18_estrate_bits_z(compressed_z)
         total_bits_z_mv, _ = self.iclr18_estrate_bits_z_mv(compressed_z_mv)
 
