@@ -1,492 +1,496 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
-import argparse
-import math
+# train_dcvc.py
 import os
-import random
-import time
-import numpy as np
+import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
-from PIL import Image
+import numpy as np
 from tqdm import tqdm
-import json
-import datetime
+import random
+import math
+from PIL import Image
+import torchvision.transforms as transforms
+import time
 
+# Import the model
 from src.models.DCVC_net import DCVC_net
 from src.zoo.image import model_architectures as architectures
 
 
-def str2bool(v):
-    return str(v).lower() in ("yes", "y", "true", "t", "1")
+# Define a dataset class for Vimeo-90k
+class Vimeo90kDataset(torch.utils.data.Dataset):
+    def __init__(self, root_dir, septuplet_list, transform=None, crop_size=256):
+        """
+        Args:
+            root_dir (string): Directory with all the images.
+            septuplet_list (string): Path to the file with list of septuplets.
+            transform (callable, optional): Optional transform to be applied on a sample.
+            crop_size (int): Size of the random crop.
+        """
+        self.root_dir = root_dir
+        self.transform = transform
+        self.crop_size = crop_size
+        self.septuplet_list = []
+
+        with open(septuplet_list, 'r') as f:
+            for line in f:
+                if line.strip():  # Skip empty lines
+                    self.septuplet_list.append(line.strip())
+
+    def __len__(self):
+        return len(self.septuplet_list)
+
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+
+        septuplet_name = self.septuplet_list[idx]
+        frames = []
+
+        # Load frames
+        for i in range(1, 8):  # Vimeo-90k septuplet has 7 frames
+            img_name = os.path.join(self.root_dir, septuplet_name, f'im{i}.png')
+            image = Image.open(img_name).convert('RGB')
+            frames.append(image)
+
+        # Apply random crop to the same location for all frames
+        if self.crop_size:
+            width, height = frames[0].size
+            if width > self.crop_size and height > self.crop_size:
+                x = random.randint(0, width - self.crop_size)
+                y = random.randint(0, height - self.crop_size)
+                frames = [img.crop((x, y, x + self.crop_size, y + self.crop_size)) for img in frames]
+
+        # Apply transform if provided
+        if self.transform:
+            frames = [self.transform(img) for img in frames]
+
+        # Select a consecutive pair of frames randomly
+        start_idx = random.randint(0, len(frames) - 2)
+        ref_frame = frames[start_idx]
+        current_frame = frames[start_idx + 1]
+
+        return ref_frame, current_frame
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="DCVC Training")
-    # Model configuration
-    parser.add_argument('--i_frame_model_name', type=str, default="cheng2020-anchor")
-    parser.add_argument('--i_frame_model_path', type=str, default=None,
-                        help="Path to pretrained I-frame model")
-    parser.add_argument('--model_path', type=str, default=None,
-                        help="Path to pretrained model for finetuning")
-    parser.add_argument('--model_type', type=str, default="psnr",
-                        help="Training objective: psnr or msssim")
-
-    # Training configuration
-    parser.add_argument('--train_config', type=str, required=True,
-                        help="JSON configuration file for training dataset")
-    parser.add_argument('--output_dir', type=str, default="checkpoints",
-                        help="Directory to save model checkpoints")
-    parser.add_argument('--log_dir', type=str, default="logs",
-                        help="Directory to save tensorboard logs")
-    parser.add_argument('--save_interval', type=int, default=5000,
-                        help="Save model every n steps")
-    parser.add_argument('--eval_interval', type=int, default=1000,
-                        help="Evaluate model every n steps")
-
-    # Training hyperparameters
-    parser.add_argument('--lambda', type=float, default=1024,
-                        help="Rate-distortion trade-off parameter")
-    parser.add_argument('--lr', type=float, default=1e-4,
-                        help="Learning rate")
-    parser.add_argument('--lr_decay', type=float, default=0.1,
-                        help="Learning rate decay factor")
-    parser.add_argument('--lr_decay_steps', type=int, nargs='+', default=[200000, 400000, 500000],
-                        help="Steps at which to decay learning rate")
-    parser.add_argument('--batch_size', type=int, default=8,
-                        help="Training batch size")
-    parser.add_argument('--train_steps', type=int, default=600000,
-                        help="Total number of training steps")
-    parser.add_argument('--gop', type=int, default=10,
-                        help="GOP size for training")
-    parser.add_argument('--patch_size', type=int, default=256,
-                        help="Training patch size")
-
-    # Training stages
-    parser.add_argument('--stage', type=int, default=4,
-                        help="Training stage (1-4)")
-    parser.add_argument('--freeze_me', type=str2bool, nargs='?',
-                        const=True, default=False,
-                        help="Freeze motion estimation module")
-    parser.add_argument('--resume', type=str, default=None,
-                        help="Resume training from checkpoint")
-
-    # Hardware options
-    parser.add_argument('--cuda', type=str2bool, nargs='?',
-                        const=True, default=True)
-    parser.add_argument('--cuda_device', default=None,
-                        help="CUDA device(s) to use, e.g., 0; 0,1; 1,2,3; etc.")
-    parser.add_argument('--seed', type=int, default=42,
-                        help="Random seed")
-    parser.add_argument('--num_workers', type=int, default=4,
-                        help="Number of data loading workers")
-
-    args = parser.parse_args()
-    return args
-
-
-class VideoPairDataset(torch.utils.data.Dataset):
-    """Dataset for loading video frames in pairs (reference, current) for training"""
-
-    def __init__(self, config, patch_size=256, gop=10):
-        super().__init__()
-        self.config = config
-        self.sequences = []
-        self.patch_size = patch_size
-        self.gop = gop
-
-        # Process training dataset configuration
-        for ds_name in config:
-            for seq_name in config[ds_name]['sequences']:
-                seq_info = config[ds_name]['sequences'][seq_name]
-                base_path = config[ds_name]['base_path']
-                self.sequences.append({
-                    'name': seq_name,
-                    'path': os.path.join(base_path, seq_name),
-                    'frames': seq_info['frames']
-                })
-
-        # Create frame pairs (ref_frame, current_frame) for training
+# Define a dataset class for UVG dataset
+class UVGDataset(torch.utils.data.Dataset):
+    def __init__(self, root_dir, transform=None, crop_size=None):
+        """
+        Args:
+            root_dir (string): Directory containing UVG video frames.
+            transform (callable, optional): Optional transform to be applied on a sample.
+            crop_size (int, optional): Optional crop size. If None, no cropping is performed.
+        """
+        self.root_dir = root_dir
+        self.transform = transform
+        self.crop_size = crop_size
         self.frame_pairs = []
 
-        for seq in self.sequences:
-            # Check file naming pattern
-            files = os.listdir(seq['path'])
-            if 'im1.png' in files:
-                padding = 1
-            elif 'im00001.png' in files:
-                padding = 5
-            else:
-                raise ValueError(f"Unknown image naming convention in {seq['path']}")
+        # UVG videos - all 16 sequences
+        video_names = [
+            'Beauty', 'Bosphorus', 'HoneyBee', 'Jockey', 'ReadySteadyGo', 'ShakeNDry', 'YachtRide',
+            'ChallengeRace', 'FoodMarket', 'Lips', 'RollerCoaster', 'SkateboardingTrick',
+            'Squirrel', 'TallBuildings', 'ToddlerFountain', 'Tractor'
+        ]
 
-            seq['padding'] = padding
-
-            # Create pairs while respecting GOP structure
-            for i in range(1, seq['frames']):
-                # Only use P-frames for training
-                if i % self.gop != 0:
-                    # Find the reference frame (previous I-frame or P-frame)
-                    ref_idx = i - 1
-                    if ref_idx % self.gop == 0:
-                        # Previous frame is an I-frame
-                        ref_type = 'i_frame'
-                    else:
-                        # Previous frame is a P-frame
-                        ref_type = 'p_frame'
-
+        # Find all consecutive frame pairs for each video
+        for video_name in video_names:
+            video_dir = os.path.join(root_dir, video_name)
+            if os.path.isdir(video_dir):
+                frames = sorted([f for f in os.listdir(video_dir) if f.endswith('.png') or f.endswith('.jpg')])
+                for i in range(len(frames) - 1):
                     self.frame_pairs.append({
-                        'sequence': seq['name'],
-                        'path': seq['path'],
-                        'padding': padding,
-                        'ref_idx': ref_idx,
-                        'cur_idx': i,
-                        'ref_type': ref_type
+                        'video': video_name,
+                        'frame1': frames[i],
+                        'frame2': frames[i + 1]
                     })
 
     def __len__(self):
         return len(self.frame_pairs)
 
-    def __getitem__(self, index):
-        pair = self.frame_pairs[index]
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
 
-        # Load reference frame
-        ref_path = os.path.join(pair['path'], f"im{str(pair['ref_idx'] + 1).zfill(pair['padding'])}.png")
-        ref_img = Image.open(ref_path).convert('RGB')
+        frame_pair = self.frame_pairs[idx]
+        video_name = frame_pair['video']
+        frame1_name = frame_pair['frame1']
+        frame2_name = frame_pair['frame2']
 
-        # Load current frame
-        cur_path = os.path.join(pair['path'], f"im{str(pair['cur_idx'] + 1).zfill(pair['padding'])}.png")
-        cur_img = Image.open(cur_path).convert('RGB')
+        frame1_path = os.path.join(self.root_dir, video_name, frame1_name)
+        frame2_path = os.path.join(self.root_dir, video_name, frame2_name)
 
-        # Random crop both frames at the same position
-        width, height = ref_img.size
+        frame1 = Image.open(frame1_path).convert('RGB')
+        frame2 = Image.open(frame2_path).convert('RGB')
 
-        # Ensure images are large enough for the patch
-        if width < self.patch_size or height < self.patch_size:
-            # Scale up if needed
-            scale = max(self.patch_size / width, self.patch_size / height) * 1.1
-            new_width = int(width * scale)
-            new_height = int(height * scale)
-            ref_img = ref_img.resize((new_width, new_height), Image.BICUBIC)
-            cur_img = cur_img.resize((new_width, new_height), Image.BICUBIC)
-            width, height = new_width, new_height
+        # Apply center crop if crop_size is specified
+        if self.crop_size:
+            width, height = frame1.size
+            if width > self.crop_size and height > self.crop_size:
+                # Center crop
+                left = (width - self.crop_size) // 2
+                top = (height - self.crop_size) // 2
+                frame1 = frame1.crop((left, top, left + self.crop_size, top + self.crop_size))
+                frame2 = frame2.crop((left, top, left + self.crop_size, top + self.crop_size))
 
-        # Random crop
-        x = random.randint(0, width - self.patch_size)
-        y = random.randint(0, height - self.patch_size)
+        # Apply transform if provided
+        if self.transform:
+            frame1 = self.transform(frame1)
+            frame2 = self.transform(frame2)
 
-        ref_img = ref_img.crop((x, y, x + self.patch_size, y + self.patch_size))
-        cur_img = cur_img.crop((x, y, x + self.patch_size, y + self.patch_size))
-
-        # Convert to torch tensors and normalize to [0, 1]
-        ref_tensor = torch.from_numpy(np.array(ref_img).astype('float32').transpose(2, 0, 1)) / 255.0
-        cur_tensor = torch.from_numpy(np.array(cur_img).astype('float32').transpose(2, 0, 1)) / 255.0
-
-        # Apply random augmentations (horizontal and vertical flips)
-        if random.random() > 0.5:
-            ref_tensor = torch.flip(ref_tensor, dims=[2])  # Horizontal flip
-            cur_tensor = torch.flip(cur_tensor, dims=[2])
-
-        if random.random() > 0.5:
-            ref_tensor = torch.flip(ref_tensor, dims=[1])  # Vertical flip
-            cur_tensor = torch.flip(cur_tensor, dims=[1])
-
-        return {
-            'ref_frame': ref_tensor,
-            'cur_frame': cur_tensor,
-            'ref_type': pair['ref_type']
-        }
+        return frame1, frame2
 
 
-def PSNR(input1, input2):
-    mse = torch.mean((input1 - input2) ** 2)
-    psnr = 20 * torch.log10(1 / torch.sqrt(mse))
-    return psnr.item()
-
-
-def train_one_epoch(model, i_frame_model, train_loader, optimizer, device,
-                    global_step, args, writer):
+def train_one_epoch(model, i_frame_model, train_loader, optimizer, device, lambda_value, stage, epoch):
     model.train()
-    if i_frame_model is not None:
-        i_frame_model.eval()
-
-    epoch_loss = 0
-    epoch_psnr = 0
-    epoch_bpp = 0
+    total_loss = 0
+    total_mse = 0
+    total_bpp = 0
+    total_bpp_y = 0
+    total_bpp_z = 0
+    total_bpp_mv_y = 0
+    total_bpp_mv_z = 0
+    n_batches = 0
 
     progress_bar = tqdm(train_loader)
-    for batch_idx, batch in enumerate(progress_bar):
-        ref_frame = batch['ref_frame'].to(device)
-        cur_frame = batch['cur_frame'].to(device)
-        ref_type = batch['ref_type']
+    for batch_idx, (ref_frames, current_frames) in enumerate(progress_bar):
+        ref_frames = ref_frames.to(device)
+        current_frames = current_frames.to(device)
+
+        # Forward I-frame model to get reference frame reconstruction
+        with torch.no_grad():
+            i_frame_result = i_frame_model(ref_frames)
+            ref_frames_recon = i_frame_result["x_hat"]
+
+        # Forward DCVC model
+        if stage in [2, 3]:  # Freeze MV generation part in stages 2 and 3
+            for param in model.opticFlow.parameters():
+                param.requires_grad = False
+            for param in model.mvEncoder.parameters():
+                param.requires_grad = False
+            for param in model.mvDecoder_part1.parameters():
+                param.requires_grad = False
+            for param in model.mvDecoder_part2.parameters():
+                param.requires_grad = False
+        else:  # Unfreeze MV generation part in stages 1 and 4
+            for param in model.opticFlow.parameters():
+                param.requires_grad = True
+            for param in model.mvEncoder.parameters():
+                param.requires_grad = True
+            for param in model.mvDecoder_part1.parameters():
+                param.requires_grad = True
+            for param in model.mvDecoder_part2.parameters():
+                param.requires_grad = True
 
         # Forward pass
+        result = model(ref_frames_recon, current_frames, training=True, stage=stage)
+
+        loss = result["loss"]
+
+        # Backward and optimize
         optimizer.zero_grad()
-        result = model(ref_frame, cur_frame, training=True, stage=args.stage)
-
-        # Compute loss
-        loss = result['loss']
-
-        # Backward pass
         loss.backward()
         optimizer.step()
 
-        # Update progress
-        epoch_loss += loss.item()
-        epoch_psnr += PSNR(result['recon_image'], cur_frame)
-        epoch_bpp += result['bpp'].item()
+        # Update statistics
+        total_loss += loss.item()
+        total_bpp += result["bpp"].item()
+        if "bpp_y" in result:
+            total_bpp_y += result["bpp_y"].item()
+        if "bpp_z" in result:
+            total_bpp_z += result["bpp_z"].item()
+        if "bpp_mv_y" in result:
+            total_bpp_mv_y += result["bpp_mv_y"].item()
+        if "bpp_mv_z" in result:
+            total_bpp_mv_z += result["bpp_mv_z"].item()
 
-        avg_loss = epoch_loss / (batch_idx + 1)
-        avg_psnr = epoch_psnr / (batch_idx + 1)
-        avg_bpp = epoch_bpp / (batch_idx + 1)
+        # Calculate MSE
+        mse = nn.MSELoss()(result["recon_image"], current_frames)
+        total_mse += mse.item()
+
+        n_batches += 1
 
         # Update progress bar
         progress_bar.set_description(
-            f"Step: {global_step} | "
-            f"Loss: {avg_loss:.4f} | "
-            f"PSNR: {avg_psnr:.2f} dB | "
-            f"BPP: {avg_bpp:.4f}"
+            f"Epoch {epoch} Stage {stage} | "
+            f"Loss: {total_loss / n_batches:.4f}, "
+            f"MSE: {total_mse / n_batches:.6f}, "
+            f"BPP: {total_bpp / n_batches:.4f}"
         )
 
-        # Log to tensorboard
-        if global_step % 10 == 0:
-            writer.add_scalar('train/loss', loss.item(), global_step)
-            writer.add_scalar('train/psnr', PSNR(result['recon_image'], cur_frame), global_step)
-            writer.add_scalar('train/bpp', result['bpp'].item(), global_step)
-            writer.add_scalar('train/bpp_mv_y', result['bpp_mv_y'].item(), global_step)
-            writer.add_scalar('train/bpp_mv_z', result['bpp_mv_z'].item(), global_step)
-            writer.add_scalar('train/bpp_y', result['bpp_y'].item(), global_step)
-            writer.add_scalar('train/bpp_z', result['bpp_z'].item(), global_step)
+    # Calculate epoch statistics
+    avg_loss = total_loss / n_batches
+    avg_mse = total_mse / n_batches
+    avg_psnr = -10 * math.log10(avg_mse)
+    avg_bpp = total_bpp / n_batches
+    avg_bpp_y = total_bpp_y / n_batches if n_batches > 0 else 0
+    avg_bpp_z = total_bpp_z / n_batches if n_batches > 0 else 0
+    avg_bpp_mv_y = total_bpp_mv_y / n_batches if n_batches > 0 else 0
+    avg_bpp_mv_z = total_bpp_mv_z / n_batches if n_batches > 0 else 0
 
-        # Apply learning rate decay
-        if global_step in args.lr_decay_steps:
-            for param_group in optimizer.param_groups:
-                param_group['lr'] *= args.lr_decay
-                writer.add_scalar('train/lr', param_group['lr'], global_step)
-                print(f"Learning rate decayed to {param_group['lr']}")
-
-        # Save checkpoint
-        if global_step % args.save_interval == 0:
-            checkpoint_path = os.path.join(args.output_dir, f"model_step_{global_step}.pth")
-            torch.save({
-                'step': global_step,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': loss.item(),
-            }, checkpoint_path)
-            print(f"Checkpoint saved to {checkpoint_path}")
-
-        global_step += 1
-
-        # Stop if reached the maximum number of steps
-        if global_step >= args.train_steps:
-            break
-
-    return global_step, avg_loss, avg_psnr, avg_bpp
+    return {
+        "loss": avg_loss,
+        "mse": avg_mse,
+        "psnr": avg_psnr,
+        "bpp": avg_bpp,
+        "bpp_y": avg_bpp_y,
+        "bpp_z": avg_bpp_z,
+        "bpp_mv_y": avg_bpp_mv_y,
+        "bpp_mv_z": avg_bpp_mv_z
+    }
 
 
-def evaluate(model, i_frame_model, val_loader, device, global_step, args, writer):
+def evaluate(model, i_frame_model, test_loader, device, stage):
     model.eval()
-    if i_frame_model is not None:
-        i_frame_model.eval()
-
     total_loss = 0
-    total_psnr = 0
+    total_mse = 0
     total_bpp = 0
-    total_bpp_mv_y = 0
-    total_bpp_mv_z = 0
-    total_bpp_y = 0
-    total_bpp_z = 0
+    n_batches = 0
 
     with torch.no_grad():
-        for batch in tqdm(val_loader, desc="Evaluation"):
-            ref_frame = batch['ref_frame'].to(device)
-            cur_frame = batch['cur_frame'].to(device)
+        for batch_idx, (ref_frames, current_frames) in enumerate(test_loader):
+            ref_frames = ref_frames.to(device)
+            current_frames = current_frames.to(device)
 
-            # Forward pass
-            result = model(ref_frame, cur_frame, training=False, stage=args.stage)
+            # Forward I-frame model to get reference frame reconstruction
+            i_frame_result = i_frame_model(ref_frames)
+            ref_frames_recon = i_frame_result["x_hat"]
 
-            # Compute metrics
-            total_loss += result['loss'].item()
-            total_psnr += PSNR(result['recon_image'], cur_frame)
-            total_bpp += result['bpp'].item()
-            total_bpp_mv_y += result['bpp_mv_y'].item()
-            total_bpp_mv_z += result['bpp_mv_z'].item()
-            total_bpp_y += result['bpp_y'].item()
-            total_bpp_z += result['bpp_z'].item()
+            # Forward DCVC model
+            result = model(ref_frames_recon, current_frames, training=False, stage=stage)
 
-    # Average metrics
-    avg_loss = total_loss / len(val_loader)
-    avg_psnr = total_psnr / len(val_loader)
-    avg_bpp = total_bpp / len(val_loader)
-    avg_bpp_mv_y = total_bpp_mv_y / len(val_loader)
-    avg_bpp_mv_z = total_bpp_mv_z / len(val_loader)
-    avg_bpp_y = total_bpp_y / len(val_loader)
-    avg_bpp_z = total_bpp_z / len(val_loader)
+            loss = result["loss"]
 
-    # Log to tensorboard
-    writer.add_scalar('val/loss', avg_loss, global_step)
-    writer.add_scalar('val/psnr', avg_psnr, global_step)
-    writer.add_scalar('val/bpp', avg_bpp, global_step)
-    writer.add_scalar('val/bpp_mv_y', avg_bpp_mv_y, global_step)
-    writer.add_scalar('val/bpp_mv_z', avg_bpp_mv_z, global_step)
-    writer.add_scalar('val/bpp_y', avg_bpp_y, global_step)
-    writer.add_scalar('val/bpp_z', avg_bpp_z, global_step)
+            # Update statistics
+            total_loss += loss.item()
 
-    print(f"\nEvaluation Results at step {global_step}:")
-    print(f"Loss: {avg_loss:.4f}")
-    print(f"PSNR: {avg_psnr:.2f} dB")
-    print(f"BPP: {avg_bpp:.4f}")
+            # Calculate MSE
+            mse = nn.MSELoss()(result["recon_image"], current_frames)
+            total_mse += mse.item()
 
-    return avg_loss, avg_psnr, avg_bpp
+            total_bpp += result["bpp"].item()
+
+            n_batches += 1
+
+    # Calculate average statistics
+    avg_loss = total_loss / n_batches
+    avg_mse = total_mse / n_batches
+    avg_psnr = -10 * math.log10(avg_mse)
+    avg_bpp = total_bpp / n_batches
+
+    return {
+        "loss": avg_loss,
+        "mse": avg_mse,
+        "psnr": avg_psnr,
+        "bpp": avg_bpp
+    }
 
 
 def main():
-    # Parse arguments
-    args = parse_args()
+    parser = argparse.ArgumentParser(description='DCVC Training')
+    parser.add_argument('--vimeo_dir', type=str, required=True, help='Path to Vimeo-90k dataset')
+    parser.add_argument('--septuplet_list', type=str, required=True, help='Path to septuplet list file')
+    parser.add_argument('--i_frame_model_name', type=str, default='cheng2020-anchor', help='I-frame model name')
+    parser.add_argument('--i_frame_model_path', type=str, required=True, help='Path to I-frame model checkpoint')
+    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help='Directory to save checkpoints')
+    parser.add_argument('--log_dir', type=str, default='logs', help='Directory to save logs')
+    parser.add_argument('--batch_size', type=int, default=4, help='Batch size')
+    parser.add_argument('--crop_size', type=int, default=256, help='Random crop size')
+    parser.add_argument('--lambda_value', type=float, required=True, help='Lambda value for rate-distortion trade-off')
+    parser.add_argument('--quality_index', type=int, required=True, help='Quality index (0-3) for the model name')
+    parser.add_argument('--stage', type=int, required=True, choices=[1, 2, 3, 4], help='Training stage (1-4)')
+    parser.add_argument('--epochs', type=int, default=10, help='Number of epochs for this stage')
+    parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--cuda', type=bool, default=True, help='Use CUDA')
+    parser.add_argument('--cuda_device', type=str, default='0', help='CUDA device indices')
+    parser.add_argument('--num_workers', type=int, default=4, help='Number of workers for data loading')
+    parser.add_argument('--model_type', type=str, default='psnr', choices=['psnr', 'ms-ssim'],
+                        help='Model type: psnr or ms-ssim')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    parser.add_argument('--previous_stage_checkpoint', type=str, default=None,
+                        help='Path to checkpoint from previous stage to resume from')
+    parser.add_argument('--uvg_dir', type=str, required=True, help='Path to UVG dataset')
 
-    # Set random seed for reproducibility
+    args = parser.parse_args()
+
+    # Set random seed
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
 
-    # Set up device
-    if args.cuda_device is not None and args.cuda_device != '':
+    # Set CUDA devices
+    if args.cuda:
         os.environ['CUDA_VISIBLE_DEVICES'] = args.cuda_device
+        device = torch.device('cuda')
+    else:
+        device = torch.device('cpu')
 
-    device = torch.device("cuda" if args.cuda and torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    # Create checkpoint and log directories
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
+    os.makedirs(args.log_dir, exist_ok=True)
 
-    # Create output directories
-    os.makedirs(args.output_dir, exist_ok=True)
-    current_time = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    log_dir = os.path.join(args.log_dir, f"{current_time}_stage{args.stage}")
-    os.makedirs(log_dir, exist_ok=True)
+    # Create dataset and dataloader
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+    ])
 
-    # Set up tensorboard writer
-    writer = SummaryWriter(log_dir=log_dir)
+    train_dataset = Vimeo90kDataset(
+        root_dir=args.vimeo_dir,
+        septuplet_list=args.septuplet_list,
+        transform=transform,
+        crop_size=args.crop_size
+    )
 
-    # Load dataset configuration
-    with open(args.train_config, 'r') as f:
-        train_config = json.load(f)
-
-    # Create training dataset and dataloader
-    train_dataset = VideoPairDataset(train_config, patch_size=args.patch_size, gop=args.gop)
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=True,
-        drop_last=True
+        pin_memory=True
     )
 
-    print(f"Loaded {len(train_dataset)} training frame pairs.")
+    # Create test dataset (UVG) and dataloader
+    test_dataset = UVGDataset(
+        root_dir=args.uvg_dir,
+        transform=transform,
+        crop_size=args.crop_size if args.crop_size <= 1024 else 1024  # UVG is 1080p, so crop to 1024 if needed
+    )
 
-    # Create validation dataset (using the same dataset with a different random seed)
-    # This is a simplified approach; ideally we'd have a separate validation set
-    val_dataset = VideoPairDataset(train_config, patch_size=args.patch_size, gop=args.gop)
-    val_loader = DataLoader(
-        val_dataset,
+    test_loader = DataLoader(
+        test_dataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=True,
-        drop_last=False
+        pin_memory=True
     )
 
-    # Create model
-    model = DCVC_net(lmbda=getattr(args, 'lambda'))  # Using getattr since 'lambda' is a Python keyword
+    # Make script print info about UVG dataset at start
+    print(f"UVG dataset loaded with {len(test_dataset)} frame pairs.")
+
+    # Load I-frame model
+    i_frame_load_checkpoint = torch.load(args.i_frame_model_path, map_location=torch.device('cpu'))
+    i_frame_model = architectures[args.i_frame_model_name].from_state_dict(i_frame_load_checkpoint).eval()
+    i_frame_model = i_frame_model.to(device)
+
+    print(
+        f"Training model with lambda = {args.lambda_value}, quality_index = {args.quality_index}, stage = {args.stage}")
+
+    # Initialize DCVC model
+    model = DCVC_net(lmbda=args.lambda_value)
     model = model.to(device)
 
-    # Load I-frame model if needed
-    i_frame_model = None
-    if args.i_frame_model_path is not None:
-        i_frame_checkpoint = torch.load(args.i_frame_model_path, map_location=device)
-        i_frame_model = architectures[args.i_frame_model_name].from_state_dict(i_frame_checkpoint)
-        i_frame_model = i_frame_model.to(device)
-        i_frame_model.eval()  # Set to evaluation mode since we don't train it
+    # Initialize optimizer
+    if args.stage == 4 and args.previous_stage_checkpoint:
+        # Use lower learning rate for stage 4
+        optimizer = optim.Adam(model.parameters(), lr=1e-5)
+    else:
+        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
 
-    # Freeze motion estimation module if needed
-    if args.freeze_me:
-        model.opticFlow.requires_grad_(False)
-        print("Motion estimation module frozen.")
+    # Load from previous stage checkpoint if specified
+    start_epoch = 0
+    if args.previous_stage_checkpoint:
+        print(f"Loading model from previous stage checkpoint: {args.previous_stage_checkpoint}")
+        checkpoint = torch.load(args.previous_stage_checkpoint, map_location=device)
+        model.load_dict(checkpoint)  # Use load_dict method as defined in DCVC_net
 
-    # Create optimizer
-    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
-
-    # Load pretrained model or resume training if needed
-    start_step = 0
-    if args.model_path is not None:
-        checkpoint = torch.load(args.model_path, map_location=device)
-        model.load_dict(checkpoint)
-        print(f"Loaded pretrained model from {args.model_path}")
-
-    if args.resume is not None:
-        checkpoint = torch.load(args.resume, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        start_step = checkpoint['step'] + 1
-        print(f"Resumed training from step {start_step}")
-
-    # Log model architecture
-    writer.add_text('model_architecture', str(model))
-
-    # Log hyperparameters
-    hparams = {
-        'lambda': getattr(args, 'lambda'),
-        'learning_rate': args.lr,
-        'batch_size': args.batch_size,
-        'patch_size': args.patch_size,
-        'gop': args.gop,
-        'stage': args.stage,
-        'freeze_me': args.freeze_me,
-        'model_type': args.model_type
+    # Log file
+    stage_descriptions = {
+        1: "Warm up MV generation part",
+        2: "Train other modules",
+        3: "Train with bit cost",
+        4: "End-to-end training"
     }
-    writer.add_hparams(hparams, {})
+
+    log_file = os.path.join(args.log_dir,
+                            f'train_log_lambda_{args.lambda_value}_quality_{args.quality_index}_stage_{args.stage}_{args.model_type}.txt')
+    with open(log_file, 'a') as f:
+        f.write(f"Training started at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Lambda value: {args.lambda_value}\n")
+        f.write(f"Quality index: {args.quality_index}\n")
+        f.write(f"Model type: {args.model_type}\n")
+        f.write(f"Stage: {args.stage} ({stage_descriptions[args.stage]})\n")
+        f.write(f"I-frame model: {args.i_frame_model_path}\n")
+        if args.previous_stage_checkpoint:
+            f.write(f"Previous stage checkpoint: {args.previous_stage_checkpoint}\n")
+        f.write(f"UVG dataset: {len(test_dataset)} frame pairs\n")
+        f.write("=" * 80 + "\n")
+
+    # Track best model
+    best_loss = float('inf')
 
     # Training loop
-    global_step = start_step
+    for epoch in range(start_epoch, args.epochs):
+        # Train one epoch
+        train_stats = train_one_epoch(model, i_frame_model, train_loader, optimizer, device, args.lambda_value,
+                                      args.stage, epoch + 1)
 
-    try:
-        while global_step < args.train_steps:
-            # Train one epoch
-            global_step, avg_loss, avg_psnr, avg_bpp = train_one_epoch(
-                model, i_frame_model, train_loader, optimizer, device,
-                global_step, args, writer
+        # Evaluate on test set
+        test_stats = evaluate(model, i_frame_model, test_loader, device, args.stage)
+
+        # Log results
+        with open(log_file, 'a') as f:
+            f.write(f"Stage {args.stage}, Epoch {epoch + 1}/{args.epochs}:\n")
+            f.write(f"  Train Loss: {train_stats['loss']:.6f}\n")
+            f.write(f"  Train MSE: {train_stats['mse']:.6f}\n")
+            f.write(f"  Train PSNR: {train_stats['psnr']:.4f}\n")
+            f.write(f"  Train BPP: {train_stats['bpp']:.6f}\n")
+            if 'bpp_y' in train_stats:
+                f.write(f"  Train BPP_y: {train_stats['bpp_y']:.6f}\n")
+            if 'bpp_z' in train_stats:
+                f.write(f"  Train BPP_z: {train_stats['bpp_z']:.6f}\n")
+            if 'bpp_mv_y' in train_stats:
+                f.write(f"  Train BPP_mv_y: {train_stats['bpp_mv_y']:.6f}\n")
+            if 'bpp_mv_z' in train_stats:
+                f.write(f"  Train BPP_mv_z: {train_stats['bpp_mv_z']:.6f}\n")
+            f.write(f"  Test Loss: {test_stats['loss']:.6f}\n")
+            f.write(f"  Test MSE: {test_stats['mse']:.6f}\n")
+            f.write(f"  Test PSNR: {test_stats['psnr']:.4f}\n")
+            f.write(f"  Test BPP: {test_stats['bpp']:.6f}\n")
+
+        # Save latest checkpoint
+        latest_checkpoint_path = os.path.join(
+            args.checkpoint_dir,
+            f'model_dcvc_lambda_{args.lambda_value}_quality_{args.quality_index}_stage_{args.stage}_latest.pth'
+        )
+        torch.save(model.state_dict(), latest_checkpoint_path)
+
+        # Save best checkpoint if current test loss is the best so far
+        if test_stats['loss'] < best_loss:
+            best_loss = test_stats['loss']
+            best_checkpoint_path = os.path.join(
+                args.checkpoint_dir,
+                f'model_dcvc_lambda_{args.lambda_value}_quality_{args.quality_index}_stage_{args.stage}_best.pth'
             )
+            torch.save(model.state_dict(), best_checkpoint_path)
+            print(f"New best model saved with test loss: {best_loss:.6f}")
 
-            # Evaluate model
-            if global_step % args.eval_interval == 0:
-                eval_loss, eval_psnr, eval_bpp = evaluate(
-                    model, i_frame_model, val_loader, device, global_step, args, writer
-                )
+        print(f"Epoch {epoch + 1}/{args.epochs} completed. Latest checkpoint saved.")
 
-    except KeyboardInterrupt:
-        print("Training interrupted.")
+    # Save final model for this stage
+    final_model_path = os.path.join(
+        args.checkpoint_dir,
+        f'model_dcvc_lambda_{args.lambda_value}_quality_{args.quality_index}_stage_{args.stage}.pth'
+    )
+    torch.save(model.state_dict(), final_model_path)
+    print(f"Final model for stage {args.stage} saved to {final_model_path}")
 
-    # Save final model
-    final_checkpoint_path = os.path.join(args.output_dir, f"model_final_stage{args.stage}.pth")
-    torch.save({
-        'step': global_step,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-    }, final_checkpoint_path)
-    print(f"Final model saved to {final_checkpoint_path}")
+    # If this is the final stage (4), also save with the standard naming convention
+    if args.stage == 4:
+        standard_model_path = os.path.join(
+            args.checkpoint_dir,
+            f'model_dcvc_quality_{args.quality_index}_{args.model_type}.pth'
+        )
+        torch.save(model.state_dict(), standard_model_path)
+        print(f"Final model (standard name) saved to {standard_model_path}")
 
-    # Close tensorboard writer
-    writer.close()
+    with open(log_file, 'a') as f:
+        f.write(f"Training completed at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("=" * 80 + "\n\n")
 
-    print("Training completed.")
+    print(f"Training completed for stage {args.stage}!")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
-
-# python train_dcvc.py --train_config dataset_config.json --stage 1 --lambda 1024 --output_dir checkpoints/stage1 --log_dir logs/stage1 --cuda true --cuda_device 0,1
-# python train_dcvc.py --train_config dataset_config.json --stage 2 --lambda 1024 --output_dir checkpoints/stage2 --log_dir logs/stage2 --freeze_me true --model_path checkpoints/stage1/model_final_stage1.pth --cuda true --cuda_device 0,1
-# python train_dcvc.py --train_config dataset_config.json --stage 3 --lambda 1024 --output_dir checkpoints/stage3 --log_dir logs/stage3 --freeze_me true --model_path checkpoints/stage2/model_final_stage2.pth --cuda true --cuda_device 0,1
-# python train_dcvc.py --train_config dataset_config.json --stage 4 --lambda 1024 --output_dir checkpoints/stage4 --log_dir logs/stage4 --model_path checkpoints/stage3/model_final_stage3.pth --cuda true --cuda_device 0,1
