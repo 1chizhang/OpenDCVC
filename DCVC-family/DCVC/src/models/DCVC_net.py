@@ -13,11 +13,13 @@ from ..layers.layers import MaskedConv2d, subpel_conv3x3
 
 
 class DCVC_net(nn.Module):
-    def __init__(self):
+    def __init__(self, lmbda=1.0):
         super().__init__()
         out_channel_mv = 128
         out_channel_N = 64
         out_channel_M = 96
+
+        self.lmbda = lmbda
 
         self.out_channel_mv = out_channel_mv
         self.out_channel_N = out_channel_N
@@ -177,6 +179,7 @@ class DCVC_net(nn.Module):
             GDN(out_channel_N),
             nn.Conv2d(out_channel_N, out_channel_M, 5, stride=2, padding=2),
         )
+        self.mse = nn.MSELoss()
 
         self.opticFlow = ME_Spynet()
 
@@ -542,7 +545,7 @@ class DCVC_net(nn.Module):
 
         return recon_image
 
-    def forward(self, referframe, input_image,training = True):
+    def forward(self, referframe, input_image,training = True,stage = 1):
         estmv = self.opticFlow(input_image, referframe)
         mvfeature = self.mvEncoder(estmv)
         z_mv = self.mvpriorEncoder(mvfeature)
@@ -615,6 +618,33 @@ class DCVC_net(nn.Module):
 
         bpp = bpp_y + bpp_z + bpp_mv_y + bpp_mv_z
 
+        loss = 0
+        #loss calculation
+        if stage == 1:
+            #in stage 1, we calculate L_me = lambda*distortion(rec,inp) + bpp_mv_y + bpp_mv_z
+            mse_loss = self.mse(recon_image, input_image)
+            distortion = self.lmbda *255**2*mse_loss
+            L_me = distortion + bpp_mv_y + bpp_mv_z
+            loss = L_me
+        elif stage == 2:
+            #in stage 2, we train other modules except mv generation module. at this time, we freeze the mv generation module and calculate L_rec = lambda*distortion(rec,inp)
+            mse_loss = self.mse(recon_image, input_image)
+            L_rec = self.lmbda *255**2*mse_loss
+            loss = L_rec
+        elif stage ==3:
+            #in stage 3, the mv generation module is still frozen, and we calculate L_con = lambda*distortion(rec,inp) + bpp_y + bpp_z
+            mse_loss = self.mse(recon_image, input_image)
+            distortion = self.lmbda *255**2*mse_loss
+            L_con = distortion + bpp_y + bpp_z
+            loss = L_con
+        elif stage == 4:
+            #in stage 4, we train all modules and calculate L_all = lambda*distortion(rec,inp) + bpp
+            mse_loss = self.mse(recon_image, input_image)
+            distortion = self.lmbda *255**2*mse_loss
+            L_all = distortion + bpp
+            loss = L_all
+
+
         return {"bpp_mv_y": bpp_mv_y,
                 "bpp_mv_z": bpp_mv_z,
                 "bpp_y": bpp_y,
@@ -622,6 +652,7 @@ class DCVC_net(nn.Module):
                 "bpp": bpp,
                 "recon_image": recon_image,
                 "context": context,
+                "loss": loss
                 }
 
     def load_dict(self, pretrained_dict):
