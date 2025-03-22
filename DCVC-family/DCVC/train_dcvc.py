@@ -18,19 +18,21 @@ from src.models.DCVC_net import DCVC_net
 from src.zoo.image import model_architectures as architectures
 
 
-# Define a dataset class for Vimeo-90k
-class Vimeo90kDataset(torch.utils.data.Dataset):
-    def __init__(self, root_dir, septuplet_list, transform=None, crop_size=256):
+# Define a dataset class for Vimeo-90k that returns GOP sequences
+class Vimeo90kGOPDataset(torch.utils.data.Dataset):
+    def __init__(self, root_dir, septuplet_list, transform=None, crop_size=256, gop_size=7):
         """
         Args:
             root_dir (string): Directory with all the images.
             septuplet_list (string): Path to the file with list of septuplets.
             transform (callable, optional): Optional transform to be applied on a sample.
             crop_size (int): Size of the random crop.
+            gop_size (int): GOP size for training.
         """
         self.root_dir = root_dir
         self.transform = transform
         self.crop_size = crop_size
+        self.gop_size = gop_size
         self.septuplet_list = []
 
         with open(septuplet_list, 'r') as f:
@@ -66,27 +68,33 @@ class Vimeo90kDataset(torch.utils.data.Dataset):
         if self.transform:
             frames = [self.transform(img) for img in frames]
 
-        # Select a consecutive pair of frames randomly
-        start_idx = random.randint(0, len(frames) - 2)
-        ref_frame = frames[start_idx]
-        current_frame = frames[start_idx + 1]
+        # For each frame, assign a positional index to help model understand GOP structure
+        # First frame is position 0, then 1, 2, etc.
+        # We'll use modulo GOP size to indicate the position in GOP
+        frame_indices = list(range(len(frames)))
 
-        return ref_frame, current_frame
+        # Random offset to simulate different positions in GOP
+        offset = random.randint(0, self.gop_size - 1)
+        frame_indices = [(i + offset) for i in frame_indices]
+
+        return frames, frame_indices
 
 
-# Define a dataset class for UVG dataset
-class UVGDataset(torch.utils.data.Dataset):
-    def __init__(self, root_dir, transform=None, crop_size=None):
+# Define a dataset class for UVG that returns GOP sequences
+class UVGGOPDataset(torch.utils.data.Dataset):
+    def __init__(self, root_dir, transform=None, crop_size=None, gop_size=12):
         """
         Args:
             root_dir (string): Directory containing UVG video frames.
             transform (callable, optional): Optional transform to be applied on a sample.
             crop_size (int, optional): Optional crop size. If None, no cropping is performed.
+            gop_size (int): GOP size for training.
         """
         self.root_dir = root_dir
         self.transform = transform
         self.crop_size = crop_size
-        self.frame_pairs = []
+        self.gop_size = gop_size
+        self.video_sequences = []
 
         # UVG videos - all 16 sequences
         video_names = [
@@ -95,55 +103,64 @@ class UVGDataset(torch.utils.data.Dataset):
             'Squirrel', 'TallBuildings', 'ToddlerFountain', 'Tractor'
         ]
 
-        # Find all consecutive frame pairs for each video
+        # Get sequences of frames for each video
         for video_name in video_names:
             video_dir = os.path.join(root_dir, video_name)
             if os.path.isdir(video_dir):
                 frames = sorted([f for f in os.listdir(video_dir) if f.endswith('.png') or f.endswith('.jpg')])
-                for i in range(len(frames) - 1):
-                    self.frame_pairs.append({
-                        'video': video_name,
-                        'frame1': frames[i],
-                        'frame2': frames[i + 1]
-                    })
+
+                # Divide frames into sequences of length gop_size (or maximum available)
+                for i in range(0, len(frames), gop_size):
+                    seq_frames = frames[i:min(i + gop_size, len(frames))]
+                    if len(seq_frames) >= 2:  # Need at least 2 frames for P-frame training
+                        self.video_sequences.append({
+                            'video': video_name,
+                            'frames': seq_frames
+                        })
 
     def __len__(self):
-        return len(self.frame_pairs)
+        return len(self.video_sequences)
 
     def __getitem__(self, idx):
         if torch.is_tensor(idx):
             idx = idx.tolist()
 
-        frame_pair = self.frame_pairs[idx]
-        video_name = frame_pair['video']
-        frame1_name = frame_pair['frame1']
-        frame2_name = frame_pair['frame2']
+        sequence = self.video_sequences[idx]
+        video_name = sequence['video']
+        frame_names = sequence['frames']
 
-        frame1_path = os.path.join(self.root_dir, video_name, frame1_name)
-        frame2_path = os.path.join(self.root_dir, video_name, frame2_name)
-
-        frame1 = Image.open(frame1_path).convert('RGB')
-        frame2 = Image.open(frame2_path).convert('RGB')
+        frames = []
+        for frame_name in frame_names:
+            frame_path = os.path.join(self.root_dir, video_name, frame_name)
+            frame = Image.open(frame_path).convert('RGB')
+            frames.append(frame)
 
         # Apply center crop if crop_size is specified
         if self.crop_size:
-            width, height = frame1.size
+            width, height = frames[0].size
             if width > self.crop_size and height > self.crop_size:
                 # Center crop
                 left = (width - self.crop_size) // 2
                 top = (height - self.crop_size) // 2
-                frame1 = frame1.crop((left, top, left + self.crop_size, top + self.crop_size))
-                frame2 = frame2.crop((left, top, left + self.crop_size, top + self.crop_size))
+                frames = [img.crop((left, top, left + self.crop_size, top + self.crop_size)) for img in frames]
 
         # Apply transform if provided
         if self.transform:
-            frame1 = self.transform(frame1)
-            frame2 = self.transform(frame2)
+            frames = [self.transform(img) for img in frames]
 
-        return frame1, frame2
+        # Assign indices based on position in GOP
+        frame_indices = list(range(len(frames)))
+
+        return frames, frame_indices
 
 
-def train_one_epoch(model, i_frame_model, train_loader, optimizer, device, lambda_value, stage, epoch):
+def train_one_epoch(model, i_frame_model, train_loader, optimizer, device, lambda_value, stage, epoch, gop_size=12):
+    """
+    Train for one epoch with GOP structure awareness
+
+    Args:
+        gop_size: Group of Pictures size, typically 12 for non-HEVC videos, 10 for HEVC
+    """
     model.train()
     total_loss = 0
     total_mse = 0
@@ -154,81 +171,121 @@ def train_one_epoch(model, i_frame_model, train_loader, optimizer, device, lambd
     total_bpp_mv_z = 0
     n_batches = 0
 
+    # We need frames organized in GOP structure, not random pairs
     progress_bar = tqdm(train_loader)
-    for batch_idx, (ref_frames, current_frames) in enumerate(progress_bar):
-        ref_frames = ref_frames.to(device)
-        current_frames = current_frames.to(device)
 
-        # Forward I-frame model to get reference frame reconstruction
-        with torch.no_grad():
-            i_frame_result = i_frame_model(ref_frames)
-            ref_frames_recon = i_frame_result["x_hat"]
+    # For training, we simulate GOP processing by treating each frame based on position
+    for batch_idx, (frames, frame_indices) in enumerate(progress_bar):
+        batch_loss = 0
+        batch_mse = 0
+        batch_bpp = 0
 
-        # Forward DCVC model
-        if stage in [2, 3]:  # Freeze MV generation part in stages 2 and 3
-            for param in model.opticFlow.parameters():
-                param.requires_grad = False
-            for param in model.mvEncoder.parameters():
-                param.requires_grad = False
-            for param in model.mvDecoder_part1.parameters():
-                param.requires_grad = False
-            for param in model.mvDecoder_part2.parameters():
-                param.requires_grad = False
-        else:  # Unfreeze MV generation part in stages 1 and 4
-            for param in model.opticFlow.parameters():
-                param.requires_grad = True
-            for param in model.mvEncoder.parameters():
-                param.requires_grad = True
-            for param in model.mvDecoder_part1.parameters():
-                param.requires_grad = True
-            for param in model.mvDecoder_part2.parameters():
-                param.requires_grad = True
+        # Process each sample in the batch
+        for i in range(len(frames)):
+            frame_sequence = frames[i]  # Get sequence of frames for this sample
+            indices = frame_indices[i]  # Get corresponding indices
 
-        # Forward pass
-        result = model(ref_frames_recon, current_frames, training=True, stage=stage)
+            # Convert to proper device
+            frame_sequence = [f.to(device) for f in frame_sequence]
 
-        loss = result["loss"]
+            # Determine if this is an I-frame or P-frame based on GOP position
+            # First frame in GOP is I-frame, rest are P-frames
+            ref_frame = None
 
-        # Backward and optimize
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+            for j, (idx, frame) in enumerate(zip(indices, frame_sequence)):
+                if idx % gop_size == 0:  # I-frame
+                    # Process as I-frame (independently)
+                    with torch.no_grad():  # Don't need gradients for I-frame during P-frame training
+                        i_frame_result = i_frame_model(frame)
+                        ref_frame = i_frame_result["x_hat"]
+                else:  # P-frame
+                    if ref_frame is None:
+                        # If we don't have a reference frame yet, skip this frame
+                        continue
+
+                    # Process as P-frame using the previous frame as reference
+                    # Control parameter freezing based on stage
+                    if stage in [2, 3]:  # Freeze MV generation part in stages 2 and 3
+                        for param in model.opticFlow.parameters():
+                            param.requires_grad = False
+                        for param in model.mvEncoder.parameters():
+                            param.requires_grad = False
+                        for param in model.mvDecoder_part1.parameters():
+                            param.requires_grad = False
+                        for param in model.mvDecoder_part2.parameters():
+                            param.requires_grad = False
+                    else:  # Unfreeze MV generation part in stages 1 and 4
+                        for param in model.opticFlow.parameters():
+                            param.requires_grad = True
+                        for param in model.mvEncoder.parameters():
+                            param.requires_grad = True
+                        for param in model.mvDecoder_part1.parameters():
+                            param.requires_grad = True
+                        for param in model.mvDecoder_part2.parameters():
+                            param.requires_grad = True
+
+                    # Forward pass for P-frame
+                    result = model(ref_frame, frame, training=True, stage=stage)
+
+                    # Update reference frame for next frame
+                    ref_frame = result["recon_image"].detach()  # Detach to prevent gradient propagation through time
+
+                    # Accumulate loss
+                    loss = result["loss"]
+                    batch_loss += loss.item()
+
+                    # Backward pass for each P-frame
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+
+                    # Gather metrics
+                    batch_mse += nn.MSELoss()(result["recon_image"], frame).item()
+                    batch_bpp += result["bpp"].item()
+                    if "bpp_y" in result:
+                        total_bpp_y += result["bpp_y"].item()
+                    if "bpp_z" in result:
+                        total_bpp_z += result["bpp_z"].item()
+                    if "bpp_mv_y" in result:
+                        total_bpp_mv_y += result["bpp_mv_y"].item()
+                    if "bpp_mv_z" in result:
+                        total_bpp_mv_z += result["bpp_mv_z"].item()
+
+                    n_batches += 1
 
         # Update statistics
-        total_loss += loss.item()
-        total_bpp += result["bpp"].item()
-        if "bpp_y" in result:
-            total_bpp_y += result["bpp_y"].item()
-        if "bpp_z" in result:
-            total_bpp_z += result["bpp_z"].item()
-        if "bpp_mv_y" in result:
-            total_bpp_mv_y += result["bpp_mv_y"].item()
-        if "bpp_mv_z" in result:
-            total_bpp_mv_z += result["bpp_mv_z"].item()
+        if n_batches > 0:
+            total_loss += batch_loss
+            total_mse += batch_mse
+            total_bpp += batch_bpp
 
-        # Calculate MSE
-        mse = nn.MSELoss()(result["recon_image"], current_frames)
-        total_mse += mse.item()
-
-        n_batches += 1
-
-        # Update progress bar
-        progress_bar.set_description(
-            f"Epoch {epoch} Stage {stage} | "
-            f"Loss: {total_loss / n_batches:.4f}, "
-            f"MSE: {total_mse / n_batches:.6f}, "
-            f"BPP: {total_bpp / n_batches:.4f}"
-        )
+            # Update progress bar
+            progress_bar.set_description(
+                f"Epoch {epoch} Stage {stage} | "
+                f"Loss: {total_loss / n_batches:.4f}, "
+                f"MSE: {total_mse / n_batches:.6f}, "
+                f"BPP: {total_bpp / n_batches:.4f}"
+            )
 
     # Calculate epoch statistics
-    avg_loss = total_loss / n_batches
-    avg_mse = total_mse / n_batches
-    avg_psnr = -10 * math.log10(avg_mse)
-    avg_bpp = total_bpp / n_batches
-    avg_bpp_y = total_bpp_y / n_batches if n_batches > 0 else 0
-    avg_bpp_z = total_bpp_z / n_batches if n_batches > 0 else 0
-    avg_bpp_mv_y = total_bpp_mv_y / n_batches if n_batches > 0 else 0
-    avg_bpp_mv_z = total_bpp_mv_z / n_batches if n_batches > 0 else 0
+    if n_batches > 0:
+        avg_loss = total_loss / n_batches
+        avg_mse = total_mse / n_batches
+        avg_psnr = -10 * math.log10(avg_mse)
+        avg_bpp = total_bpp / n_batches
+        avg_bpp_y = total_bpp_y / n_batches
+        avg_bpp_z = total_bpp_z / n_batches
+        avg_bpp_mv_y = total_bpp_mv_y / n_batches
+        avg_bpp_mv_z = total_bpp_mv_z / n_batches
+    else:
+        avg_loss = 0
+        avg_mse = 0
+        avg_psnr = 0
+        avg_bpp = 0
+        avg_bpp_y = 0
+        avg_bpp_z = 0
+        avg_bpp_mv_y = 0
+        avg_bpp_mv_z = 0
 
     return {
         "loss": avg_loss,
@@ -242,43 +299,73 @@ def train_one_epoch(model, i_frame_model, train_loader, optimizer, device, lambd
     }
 
 
-def evaluate(model, i_frame_model, test_loader, device, stage):
+def evaluate(model, i_frame_model, test_loader, device, stage, gop_size=12):
+    """
+    Evaluate model on test set with GOP structure awareness
+
+    Args:
+        gop_size: Group of Pictures size, typically 12 for non-HEVC videos, 10 for HEVC
+    """
     model.eval()
     total_loss = 0
     total_mse = 0
     total_bpp = 0
-    n_batches = 0
+    n_frames = 0
 
     with torch.no_grad():
-        for batch_idx, (ref_frames, current_frames) in enumerate(test_loader):
-            ref_frames = ref_frames.to(device)
-            current_frames = current_frames.to(device)
+        for batch_idx, (frames, frame_indices) in enumerate(test_loader):
+            # Process each sample in the batch
+            for i in range(len(frames)):
+                frame_sequence = frames[i]  # Get sequence of frames for this sample
+                indices = frame_indices[i]  # Get corresponding indices
 
-            # Forward I-frame model to get reference frame reconstruction
-            i_frame_result = i_frame_model(ref_frames)
-            ref_frames_recon = i_frame_result["x_hat"]
+                # Convert to proper device
+                frame_sequence = [f.to(device) for f in frame_sequence]
 
-            # Forward DCVC model
-            result = model(ref_frames_recon, current_frames, training=False, stage=stage)
+                # Initialize reference frame
+                ref_frame = None
 
-            loss = result["loss"]
+                # Process each frame in the sequence according to GOP structure
+                for j, (idx, frame) in enumerate(zip(indices, frame_sequence)):
+                    if idx % gop_size == 0:  # I-frame
+                        # Process as I-frame
+                        i_frame_result = i_frame_model(frame.unsqueeze(0))
+                        ref_frame = i_frame_result["x_hat"]
 
-            # Update statistics
-            total_loss += loss.item()
+                        # Skip metrics for I-frames (we're mainly interested in P-frame performance)
+                    else:  # P-frame
+                        if ref_frame is None:
+                            # If we don't have a reference frame yet, skip this frame
+                            continue
 
-            # Calculate MSE
-            mse = nn.MSELoss()(result["recon_image"], current_frames)
-            total_mse += mse.item()
+                        # Process as P-frame
+                        result = model(ref_frame, frame.unsqueeze(0), training=False, stage=stage)
 
-            total_bpp += result["bpp"].item()
+                        # Update reference frame for next iteration
+                        ref_frame = result["recon_image"]
 
-            n_batches += 1
+                        # Calculate metrics for P-frames
+                        loss = result["loss"]
+                        total_loss += loss.item()
+
+                        mse = nn.MSELoss()(result["recon_image"], frame.unsqueeze(0))
+                        total_mse += mse.item()
+
+                        total_bpp += result["bpp"].item()
+
+                        n_frames += 1
 
     # Calculate average statistics
-    avg_loss = total_loss / n_batches
-    avg_mse = total_mse / n_batches
-    avg_psnr = -10 * math.log10(avg_mse)
-    avg_bpp = total_bpp / n_batches
+    if n_frames > 0:
+        avg_loss = total_loss / n_frames
+        avg_mse = total_mse / n_frames
+        avg_psnr = -10 * math.log10(avg_mse)
+        avg_bpp = total_bpp / n_frames
+    else:
+        avg_loss = 0
+        avg_mse = 0
+        avg_psnr = 0
+        avg_bpp = 0
 
     return {
         "loss": avg_loss,
@@ -312,6 +399,8 @@ def main():
     parser.add_argument('--previous_stage_checkpoint', type=str, default=None,
                         help='Path to checkpoint from previous stage to resume from')
     parser.add_argument('--uvg_dir', type=str, required=True, help='Path to UVG dataset')
+    # Add GOP size argument
+    parser.add_argument('--gop_size', type=int, default=12, help='GOP size (12 for non-HEVC, 10 for HEVC)')
 
     args = parser.parse_args()
 
@@ -336,26 +425,39 @@ def main():
         transforms.ToTensor(),
     ])
 
-    train_dataset = Vimeo90kDataset(
+    # Remove any old dataset class definitions still in the code
+    # Vimeo90kDataset and UVGDataset should be replaced completely
+
+    # Create training dataset with GOP structure
+    train_dataset = Vimeo90kGOPDataset(
         root_dir=args.vimeo_dir,
         septuplet_list=args.septuplet_list,
         transform=transform,
-        crop_size=args.crop_size
+        crop_size=args.crop_size,
+        gop_size=args.gop_size
     )
+
+    # Create a custom collate function to handle variable-length sequences
+    def custom_collate_fn(batch):
+        frames_list = [item[0] for item in batch]
+        indices_list = [item[1] for item in batch]
+        return frames_list, indices_list
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=True
+        pin_memory=True,
+        collate_fn=custom_collate_fn
     )
 
-    # Create test dataset (UVG) and dataloader
-    test_dataset = UVGDataset(
+    # Create test dataset (UVG) with GOP structure
+    test_dataset = UVGGOPDataset(
         root_dir=args.uvg_dir,
         transform=transform,
-        crop_size=args.crop_size if args.crop_size <= 1024 else 1024  # UVG is 1080p, so crop to 1024 if needed
+        crop_size=args.crop_size if args.crop_size <= 1024 else 1024,  # UVG is 1080p, so crop to 1024 if needed
+        gop_size=args.gop_size
     )
 
     test_loader = DataLoader(
@@ -363,7 +465,8 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=True
+        pin_memory=True,
+        collate_fn=custom_collate_fn
     )
 
     # Make script print info about UVG dataset at start
@@ -422,12 +525,12 @@ def main():
 
     # Training loop
     for epoch in range(start_epoch, args.epochs):
-        # Train one epoch
+        # Train one epoch with GOP awareness
         train_stats = train_one_epoch(model, i_frame_model, train_loader, optimizer, device, args.lambda_value,
-                                      args.stage, epoch + 1)
+                                      args.stage, epoch + 1, args.gop_size)
 
-        # Evaluate on test set
-        test_stats = evaluate(model, i_frame_model, test_loader, device, args.stage)
+        # Evaluate on test set with GOP awareness
+        test_stats = evaluate(model, i_frame_model, test_loader, device, args.stage, args.gop_size)
 
         # Log results
         with open(log_file, 'a') as f:
@@ -494,3 +597,16 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+# python train_dcvc.py \
+#   --vimeo_dir /path/to/vimeo_90k/train \
+#   --septuplet_list /path/to/vimeo_90k/sep_trainlist.txt \
+#   --uvg_dir /path/to/uvg_dataset \
+#   --i_frame_model_path checkpoints/cheng2020-anchor-3-e49be189.pth.tar \
+#   --lambda_value 256 \
+#   --quality_index 0 \
+#   --stage 1 \
+#   --epochs 5 \
+#   --gop_size 12 \  # Use 10 for HEVC test videos
+#   --model_type psnr \
+#   --batch_size 4
