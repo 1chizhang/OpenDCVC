@@ -1,4 +1,3 @@
-# train_dcvc.py
 import os
 import argparse
 import torch
@@ -388,6 +387,14 @@ def main():
     parser.add_argument('--uvg_dir', type=str, required=True, help='Path to UVG dataset')
     # Add GOP size argument
     parser.add_argument('--gop_size', type=int, default=12, help='GOP size (12 for non-HEVC, 10 for HEVC)')
+    
+    # Add new arguments for resume training and SpyNet initialization
+    parser.add_argument('--resume', type=str, default=None, 
+                       help='Path to checkpoint to resume training from')
+    parser.add_argument('--spynet_checkpoint', type=str, default=None, 
+                       help='Path to SpyNet pretrained weights to initialize motion estimation network')
+    parser.add_argument('--spynet_from_dcvc_checkpoint', type=str, default=None,
+                        help='Path to DCVC checkpoint to initialize SpyNet weights')
 
     args = parser.parse_args()
 
@@ -412,16 +419,12 @@ def main():
         transforms.ToTensor(),
     ])
 
-    # Remove any old dataset class definitions still in the code
-    # Vimeo90kDataset and UVGDataset should be replaced completely
-
     # Create training dataset with GOP structure
     train_dataset = Vimeo90kGOPDataset(
         root_dir=args.vimeo_dir,
         septuplet_list=args.septuplet_list,
         transform=transform,
         crop_size=args.crop_size,
-        gop_size=args.gop_size
     )
 
     # Create a custom collate function to handle variable-length sequences
@@ -477,12 +480,61 @@ def main():
     else:
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
 
-    # Load from previous stage checkpoint if specified
+    # Initialize starting epoch and best loss
     start_epoch = 0
-    if args.previous_stage_checkpoint:
+    best_loss = float('inf')
+
+    # Check for SpyNet initialization
+    if args.spynet_checkpoint:
+        print(f"Initializing motion estimation network with pretrained SpyNet weights: {args.spynet_checkpoint}")
+        spynet_checkpoint = torch.load(args.spynet_checkpoint, map_location=device)
+        
+        spynet_state_dict = spynet_checkpoint['state_dict']
+        model.opticFlow.load_state_dict(spynet_state_dict, strict=True)
+        print("Loaded SpyNet weights directly into opticFlow component")
+    
+    if args.spynet_from_dcvc_checkpoint:
+        print(f"Initializing motion estimation network with SpyNet weights from DCVC checkpoint: {args.spynet_from_dcvc_checkpoint}")
+        spynet_checkpoint = torch.load(args.spynet_from_dcvc_checkpoint, map_location=device)
+
+        for key in list(spynet_checkpoint.keys()):
+            if key.startswith('opticFlow'):
+                spynet_state_dict = {k.replace('opticFlow.', ''): v for k, v in spynet_checkpoint.items()}
+                break        
+        model.opticFlow.load_state_dict(spynet_state_dict, strict=True)
+        print("Loaded SpyNet weights from DCVC checkpoint into opticFlow component")
+
+    # Resume training from checkpoint if specified
+    if args.resume:
+        print(f"Resuming training from checkpoint: {args.resume}")
+        try:
+            checkpoint = torch.load(args.resume, map_location=device)
+            
+            # Check if this is a state_dict only or a complete checkpoint
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                # Full checkpoint with training state
+                model.load_dict(checkpoint['model_state_dict'])
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                start_epoch = checkpoint['epoch'] + 1  # Start from next epoch
+                best_loss = checkpoint['best_loss']
+                print(f"Resumed from epoch {checkpoint['epoch']}, best loss: {best_loss:.6f}")
+            else:
+                # State dict only
+                model.load_dict(checkpoint)
+                print("Loaded model weights only (no training state)")
+        except Exception as e:
+            print(f"Error loading checkpoint: {e}")
+            print("Starting training from scratch")
+    # Load from previous stage checkpoint if no resume but previous_stage_checkpoint is specified
+    elif args.previous_stage_checkpoint:
         print(f"Loading model from previous stage checkpoint: {args.previous_stage_checkpoint}")
-        checkpoint = torch.load(args.previous_stage_checkpoint, map_location=device)
-        model.load_dict(checkpoint)  # Use load_dict method as defined in DCVC_net
+        try:
+            checkpoint = torch.load(args.previous_stage_checkpoint, map_location=device)
+            model.load_dict(checkpoint)  # Use load_dict method as defined in DCVC_net
+            print("Successfully loaded model from previous stage")
+        except Exception as e:
+            print(f"Error loading previous stage checkpoint: {e}")
+            print("Starting training from scratch")
 
     # Log file
     stage_descriptions = {
@@ -503,11 +555,13 @@ def main():
         f.write(f"I-frame model: {args.i_frame_model_path}\n")
         if args.previous_stage_checkpoint:
             f.write(f"Previous stage checkpoint: {args.previous_stage_checkpoint}\n")
+        if args.resume:
+            f.write(f"Resuming from checkpoint: {args.resume}\n")
+            f.write(f"Starting from epoch: {start_epoch}\n")
+        if args.spynet_checkpoint:
+            f.write(f"SpyNet initialization: {args.spynet_checkpoint}\n")
         f.write(f"UVG dataset: {len(test_dataset)} frame pairs\n")
         f.write("=" * 80 + "\n")
-
-    # Track best model
-    best_loss = float('inf')
 
     # Training loop
     for epoch in range(start_epoch, args.epochs):
@@ -538,12 +592,22 @@ def main():
             f.write(f"  Test PSNR: {test_stats['psnr']:.4f}\n")
             f.write(f"  Test BPP: {test_stats['bpp']:.6f}\n")
 
-        # Save latest checkpoint
+        # Save latest checkpoint with training state for resuming
         latest_checkpoint_path = os.path.join(
             args.checkpoint_dir,
             f'model_dcvc_lambda_{args.lambda_value}_quality_{args.quality_index}_stage_{args.stage}_latest.pth'
         )
-        torch.save(model.state_dict(), latest_checkpoint_path)
+        # Save full training state for resume capability
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss': train_stats['loss'],
+            'best_loss': best_loss,
+            'stage': args.stage,
+            'quality_index': args.quality_index,
+            'lambda_value': args.lambda_value
+        }, latest_checkpoint_path)
 
         # Save best checkpoint if current test loss is the best so far
         if test_stats['loss'] < best_loss:
@@ -552,12 +616,22 @@ def main():
                 args.checkpoint_dir,
                 f'model_dcvc_lambda_{args.lambda_value}_quality_{args.quality_index}_stage_{args.stage}_best.pth'
             )
-            torch.save(model.state_dict(), best_checkpoint_path)
+            # Save full training state for the best model too
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': test_stats['loss'],
+                'best_loss': best_loss,
+                'stage': args.stage,
+                'quality_index': args.quality_index,
+                'lambda_value': args.lambda_value
+            }, best_checkpoint_path)
             print(f"New best model saved with test loss: {best_loss:.6f}")
 
         print(f"Epoch {epoch + 1}/{args.epochs} completed. Latest checkpoint saved.")
 
-    # Save final model for this stage
+    # Save final model for this stage (state_dict only for compatibility with original code)
     final_model_path = os.path.join(
         args.checkpoint_dir,
         f'model_dcvc_lambda_{args.lambda_value}_quality_{args.quality_index}_stage_{args.stage}.pth'
@@ -584,15 +658,17 @@ def main():
 if __name__ == '__main__':
     main()
 
+# Example command with resume training and SpyNet initialization:
 # python train_dcvc.py \
-#   --vimeo_dir /path/to/vimeo_90k/train \
-#   --septuplet_list /path/to/vimeo_90k/sep_trainlist.txt \
-#   --uvg_dir /path/to/uvg_dataset \
+#   --vimeo_dir /data/zhan5096/Project/dataset/Vimeo90k/vimeo_septuplet/sequences \
+#   --septuplet_list /data/zhan5096/Project/dataset/Vimeo90k/vimeo_septuplet/sep_trainlist.txt \
+#   --uvg_dir /data/zhan5096/Project/dataset/UVG/png_sequences \
 #   --i_frame_model_path checkpoints/cheng2020-anchor-3-e49be189.pth.tar \
 #   --lambda_value 256 \
 #   --quality_index 0 \
 #   --stage 1 \
 #   --epochs 5 \
-#   --gop_size 12 \  # Use 10 for HEVC test videos
+#   --gop_size 12 \
 #   --model_type psnr \
-#   --batch_size 4
+#   --batch_size 4 \
+#   --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_0_psnr.pth

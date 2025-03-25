@@ -11,3 +11,4 @@ build/
 .gitignore
 *.xml
 *.iml
+*.pth
