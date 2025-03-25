@@ -568,6 +568,8 @@ class DCVC_net(nn.Module):
             torch.cat((params_mv, ctx_params_mv), dim=1)
         )
         means_hat_mv, scales_hat_mv = gaussian_params_mv.chunk(2, 1)
+        scales_hat_mv = torch.nn.functional.softplus(scales_hat_mv+2.3)-2.3 #make logscale > -2.3
+        scales_hat_mv = torch.exp(scales_hat_mv)
 
         quant_mv_upsample = self.mvDecoder_part1(quant_mv)
 
@@ -599,6 +601,8 @@ class DCVC_net(nn.Module):
             torch.cat((temporal_prior_params, params, ctx_params), dim=1)
         )
         means_hat, scales_hat = gaussian_params.chunk(2, 1)
+        scales_hat = torch.nn.functional.softplus(scales_hat+2.3)-2.3 #make logscale > -2.3
+        scales_hat = torch.exp(scales_hat)
 
         recon_image_feature = self.contextualDecoder_part1(compressed_y_renorm)
         recon_image = self.contextualDecoder_part2(torch.cat((recon_image_feature, context), dim=1))
