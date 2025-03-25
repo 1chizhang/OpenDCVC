@@ -82,25 +82,21 @@ class Vimeo90kGOPDataset(torch.utils.data.Dataset):
 
 # Define a dataset class for UVG that returns GOP sequences
 class UVGGOPDataset(torch.utils.data.Dataset):
-    def __init__(self, root_dir, transform=None, crop_size=None, gop_size=12):
+    def __init__(self, root_dir, transform=None, gop_size=12):
         """
         Args:
             root_dir (string): Directory containing UVG video frames.
             transform (callable, optional): Optional transform to be applied on a sample.
-            crop_size (int, optional): Optional crop size. If None, no cropping is performed.
             gop_size (int): GOP size for training.
         """
         self.root_dir = root_dir
         self.transform = transform
-        self.crop_size = crop_size
         self.gop_size = gop_size
         self.video_sequences = []
 
         # UVG videos - all 16 sequences
         video_names = [
-            'Beauty', 'Bosphorus', 'HoneyBee', 'Jockey', 'ReadySteadyGo', 'ShakeNDry', 'YachtRide',
-            'ChallengeRace', 'FoodMarket', 'Lips', 'RollerCoaster', 'SkateboardingTrick',
-            'Squirrel', 'TallBuildings', 'ToddlerFountain', 'Tractor'
+            'Beauty_1920x1024_120fps_420_8bit_YUV', 'Bosphorus_1920x1024_120fps_420_8bit_YUV', 'HoneyBee_1920x1024_120fps_420_8bit_YUV', 'Jockey_1920x1024_120fps_420_8bit_YUV', 'ReadySteadyGo_1920x1024_120fps_420_8bit_YUV', 'ShakeNDry_1920x1024_120fps_420_8bit_YUV', 'YachtRide_1920x1024_120fps_420_8bit_YUV'
         ]
 
         # Get sequences of frames for each video
@@ -134,15 +130,6 @@ class UVGGOPDataset(torch.utils.data.Dataset):
             frame_path = os.path.join(self.root_dir, video_name, frame_name)
             frame = Image.open(frame_path).convert('RGB')
             frames.append(frame)
-
-        # Apply center crop if crop_size is specified
-        if self.crop_size:
-            width, height = frames[0].size
-            if width > self.crop_size and height > self.crop_size:
-                # Center crop
-                left = (width - self.crop_size) // 2
-                top = (height - self.crop_size) // 2
-                frames = [img.crop((left, top, left + self.crop_size, top + self.crop_size)) for img in frames]
 
         # Apply transform if provided
         if self.transform:
@@ -456,7 +443,6 @@ def main():
     test_dataset = UVGGOPDataset(
         root_dir=args.uvg_dir,
         transform=transform,
-        crop_size=args.crop_size if args.crop_size <= 1024 else 1024,  # UVG is 1080p, so crop to 1024 if needed
         gop_size=args.gop_size
     )
 
