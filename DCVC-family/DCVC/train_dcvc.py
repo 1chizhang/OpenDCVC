@@ -17,6 +17,11 @@ from src.models.DCVC_net import DCVC_net
 from src.zoo.image import model_architectures as architectures
 
 
+# Add deterministic behavior
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+os.environ['CUBLAS_WORKSPACE_CONFIG'] = ":4096:8"
+
 # Define a dataset class for Vimeo-90k that returns GOP sequences
 class Vimeo90kGOPDataset(torch.utils.data.Dataset):
     def __init__(self, root_dir, septuplet_list, transform=None, crop_size=256, gop_size=7):
@@ -67,16 +72,7 @@ class Vimeo90kGOPDataset(torch.utils.data.Dataset):
         if self.transform:
             frames = [self.transform(img) for img in frames]
 
-        # For each frame, assign a positional index to help model understand GOP structure
-        # First frame is position 0, then 1, 2, etc.
-        # We'll use modulo GOP size to indicate the position in GOP
-        frame_indices = list(range(len(frames)))
-
-        # Random offset to simulate different positions in GOP
-        offset = random.randint(0, self.gop_size - 1)
-        frame_indices = [(i + offset) for i in frame_indices]
-
-        return frames, frame_indices
+        return torch.stack(frames)  # Return frames as a single tensor [S, C, H, W]
 
 
 # Define a dataset class for UVG that returns GOP sequences
@@ -93,9 +89,12 @@ class UVGGOPDataset(torch.utils.data.Dataset):
         self.gop_size = gop_size
         self.video_sequences = []
 
-        # UVG videos - all 16 sequences
+        # UVG videos
         video_names = [
-            'Beauty_1920x1024_120fps_420_8bit_YUV', 'Bosphorus_1920x1024_120fps_420_8bit_YUV', 'HoneyBee_1920x1024_120fps_420_8bit_YUV', 'Jockey_1920x1024_120fps_420_8bit_YUV', 'ReadySteadyGo_1920x1024_120fps_420_8bit_YUV', 'ShakeNDry_1920x1024_120fps_420_8bit_YUV', 'YachtRide_1920x1024_120fps_420_8bit_YUV'
+            'Beauty_1920x1024_120fps_420_8bit_YUV', 'Bosphorus_1920x1024_120fps_420_8bit_YUV', 
+            'HoneyBee_1920x1024_120fps_420_8bit_YUV', 'Jockey_1920x1024_120fps_420_8bit_YUV', 
+            'ReadySteadyGo_1920x1024_120fps_420_8bit_YUV', 'ShakeNDry_1920x1024_120fps_420_8bit_YUV', 
+            'YachtRide_1920x1024_120fps_420_8bit_YUV'
         ]
 
         # Get sequences of frames for each video
@@ -134,18 +133,16 @@ class UVGGOPDataset(torch.utils.data.Dataset):
         if self.transform:
             frames = [self.transform(img) for img in frames]
 
-        # Assign indices based on position in GOP
-        frame_indices = list(range(len(frames)))
-
-        return frames, frame_indices
+        return torch.stack(frames)  # Return frames as a single tensor [S, C, H, W]
 
 
-def train_one_epoch(model, i_frame_model, train_loader, optimizer, device, lambda_value, stage, epoch, gop_size=12):
+def train_one_epoch_fully_batched(model, i_frame_model, train_loader, optimizer, device, lambda_value, stage, epoch, gop_size=7, gradient_accumulation_steps=1):
     """
-    Train for one epoch with GOP structure awareness
-
+    Train for one epoch with fully batched processing for GOP sequences.
+    
     Args:
-        gop_size: Group of Pictures size, typically 12 for non-HEVC videos, 10 for HEVC
+        gop_size: Group of Pictures size (7 for Vimeo90k)
+        gradient_accumulation_steps: Number of steps to accumulate gradients
     """
     model.train()
     total_loss = 0
@@ -155,114 +152,109 @@ def train_one_epoch(model, i_frame_model, train_loader, optimizer, device, lambd
     total_bpp_z = 0
     total_bpp_mv_y = 0
     total_bpp_mv_z = 0
-    n_batches = 0
-
-    # We need frames organized in GOP structure, not random pairs
+    n_frames = 0
+    
+    # Control parameter freezing based on stage - only do this once per epoch
+    if stage in [2, 3]:  # Freeze MV generation part in stages 2 and 3
+        for param in model.opticFlow.parameters():
+            param.requires_grad = False
+        for param in model.mvEncoder.parameters():
+            param.requires_grad = False
+        for param in model.mvDecoder_part1.parameters():
+            param.requires_grad = False
+        for param in model.mvDecoder_part2.parameters():
+            param.requires_grad = False
+    else:  # Unfreeze MV generation part in stages 1 and 4
+        for param in model.opticFlow.parameters():
+            param.requires_grad = True
+        for param in model.mvEncoder.parameters():
+            param.requires_grad = True
+        for param in model.mvDecoder_part1.parameters():
+            param.requires_grad = True
+        for param in model.mvDecoder_part2.parameters():
+            param.requires_grad = True
+    
+    # Process batches of GOP sequences
     progress_bar = tqdm(train_loader)
-
-    # For training, we simulate GOP processing by treating each frame based on position
-    for batch_idx, (frames, frame_indices) in enumerate(progress_bar):
+    
+    for batch_idx, batch_frames in enumerate(progress_bar):
+        batch_size = batch_frames.size(0)
+        seq_length = batch_frames.size(1)  # Number of frames in sequence (S dimension)
         batch_loss = 0
-        batch_mse = 0
-        batch_bpp = 0
-
-        # Process each sample in the batch
-        for i in range(len(frames)):
-            frame_sequence = frames[i]  # Get sequence of frames for this sample
-            indices = frame_indices[i]  # Get corresponding indices
-
-            # Convert to proper device
-            frame_sequence = [f.to(device) for f in frame_sequence]
-
-            # Determine if this is an I-frame or P-frame based on GOP position
-            # First frame in GOP is I-frame, rest are P-frames
-            ref_frame = None
-
-            for j, (idx, frame) in enumerate(zip(indices, frame_sequence)):
-                if idx % gop_size == 0:  # I-frame
-                    # Process as I-frame (independently)
-                    with torch.no_grad():  # Don't need gradients for I-frame during P-frame training
-                        i_frame_result = i_frame_model(frame)
-                        ref_frame = i_frame_result["x_hat"]
-                else:  # P-frame
-                    if ref_frame is None:
-                        # If we don't have a reference frame yet, skip this frame
-                        continue
-
-                    # Process as P-frame using the previous frame as reference
-                    # Control parameter freezing based on stage
-                    if stage in [2, 3]:  # Freeze MV generation part in stages 2 and 3
-                        for param in model.opticFlow.parameters():
-                            param.requires_grad = False
-                        for param in model.mvEncoder.parameters():
-                            param.requires_grad = False
-                        for param in model.mvDecoder_part1.parameters():
-                            param.requires_grad = False
-                        for param in model.mvDecoder_part2.parameters():
-                            param.requires_grad = False
-                    else:  # Unfreeze MV generation part in stages 1 and 4
-                        for param in model.opticFlow.parameters():
-                            param.requires_grad = True
-                        for param in model.mvEncoder.parameters():
-                            param.requires_grad = True
-                        for param in model.mvDecoder_part1.parameters():
-                            param.requires_grad = True
-                        for param in model.mvDecoder_part2.parameters():
-                            param.requires_grad = True
-
-                    # Forward pass for P-frame
-                    result = model(ref_frame, frame, training=True, stage=stage)
-
-                    # Update reference frame for next frame
-                    ref_frame = result["recon_image"].detach()  # Detach to prevent gradient propagation through time
-
-                    # Accumulate loss
-                    loss = result["loss"]
-                    batch_loss += loss.item()
-
-                    # Backward pass for each P-frame
-                    optimizer.zero_grad()
-                    loss.backward()
-                    optimizer.step()
-
-                    # Gather metrics
-                    batch_mse += nn.MSELoss()(result["recon_image"], frame).item()
-                    batch_bpp += result["bpp"].item()
-                    if "bpp_y" in result:
-                        total_bpp_y += result["bpp_y"].item()
-                    if "bpp_z" in result:
-                        total_bpp_z += result["bpp_z"].item()
-                    if "bpp_mv_y" in result:
-                        total_bpp_mv_y += result["bpp_mv_y"].item()
-                    if "bpp_mv_z" in result:
-                        total_bpp_mv_z += result["bpp_mv_z"].item()
-
-                    n_batches += 1
-
-        # Update statistics
-        if n_batches > 0:
-            total_loss += batch_loss
-            total_mse += batch_mse
-            total_bpp += batch_bpp
-
-            # Update progress bar
+        
+        # Zero gradients at the start of each batch or accumulation step
+        if batch_idx % gradient_accumulation_steps == 0:
+            optimizer.zero_grad()
+        
+        # Process each frame position sequentially within the batch
+        # For each position, we process all sequences in parallel
+        
+        # Initialize reference frames for the batch
+        reference_frames = None
+        
+        # Process each frame position in the sequence
+        for frame_pos in range(seq_length):
+            # Get all frames at this position from all sequences in the batch
+            current_frames = batch_frames[:, frame_pos, :, :, :].to(device)  # Shape: [B, C, H, W]
+            
+            if frame_pos == 0:  # First frame (I-frame) in each sequence
+                # Process all I-frames in the batch together
+                with torch.no_grad():  # Don't train I-frame model
+                    i_frame_results = i_frame_model(current_frames)
+                    reference_frames = i_frame_results["x_hat"]  # Shape: [B, C, H, W]
+            else:  # P-frames
+                # Process all P-frames in the batch with their corresponding reference frames
+                # DCVC model expects reference and current frames in the same batch size
+                result = model(reference_frames, current_frames, training=True, stage=stage)
+                
+                # Update reference frames for next position with the reconstructed frames
+                reference_frames = result["recon_image"].detach()  # Shape: [B, C, H, W]
+                
+                # Calculate loss (already accounts for batch size, just normalize by accumulation steps)
+                loss = result["loss"] / gradient_accumulation_steps
+                loss.backward()
+                
+                # Collect statistics
+                batch_loss += result["loss"].item()
+                total_mse += nn.MSELoss()(result["recon_image"], current_frames).item() * batch_size  # Account for all frames in batch
+                total_bpp += result["bpp"].item() * batch_size
+                if "bpp_y" in result:
+                    total_bpp_y += result["bpp_y"].item() * batch_size
+                if "bpp_z" in result:
+                    total_bpp_z += result["bpp_z"].item() * batch_size
+                if "bpp_mv_y" in result:
+                    total_bpp_mv_y += result["bpp_mv_y"].item() * batch_size
+                if "bpp_mv_z" in result:
+                    total_bpp_mv_z += result["bpp_mv_z"].item() * batch_size
+                
+                n_frames += batch_size  # Count all frames in batch
+        
+        # Apply accumulated gradients at the end of batch or accumulation step
+        if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == len(train_loader):
+            optimizer.step()
+        
+        # Update total loss
+        total_loss += batch_loss
+        
+        # Update progress bar
+        if n_frames > 0:
             progress_bar.set_description(
                 f"Epoch {epoch} Stage {stage} | "
-                f"Loss: {total_loss / n_batches:.4f}, "
-                f"MSE: {total_mse / n_batches:.6f}, "
-                f"BPP: {total_bpp / n_batches:.4f}"
+                f"Loss: {total_loss / n_frames:.4f}, "
+                f"MSE: {total_mse / n_frames:.6f}, "
+                f"BPP: {total_bpp / n_frames:.4f}"
             )
-
+    
     # Calculate epoch statistics
-    if n_batches > 0:
-        avg_loss = total_loss / n_batches
-        avg_mse = total_mse / n_batches
-        avg_psnr = -10 * math.log10(avg_mse)
-        avg_bpp = total_bpp / n_batches
-        avg_bpp_y = total_bpp_y / n_batches
-        avg_bpp_z = total_bpp_z / n_batches
-        avg_bpp_mv_y = total_bpp_mv_y / n_batches
-        avg_bpp_mv_z = total_bpp_mv_z / n_batches
+    if n_frames > 0:
+        avg_loss = total_loss / n_frames
+        avg_mse = total_mse / n_frames
+        avg_psnr = -10 * math.log10(avg_mse) if avg_mse > 0 else 100
+        avg_bpp = total_bpp / n_frames
+        avg_bpp_y = total_bpp_y / n_frames
+        avg_bpp_z = total_bpp_z / n_frames
+        avg_bpp_mv_y = total_bpp_mv_y / n_frames
+        avg_bpp_mv_z = total_bpp_mv_z / n_frames
     else:
         avg_loss = 0
         avg_mse = 0
@@ -272,7 +264,7 @@ def train_one_epoch(model, i_frame_model, train_loader, optimizer, device, lambd
         avg_bpp_z = 0
         avg_bpp_mv_y = 0
         avg_bpp_mv_z = 0
-
+    
     return {
         "loss": avg_loss,
         "mse": avg_mse,
@@ -285,74 +277,62 @@ def train_one_epoch(model, i_frame_model, train_loader, optimizer, device, lambd
     }
 
 
-def evaluate(model, i_frame_model, test_loader, device, stage, gop_size=12):
+def evaluate_fully_batched(model, i_frame_model, test_loader, device, stage, gop_size=12):
     """
-    Evaluate model on test set with GOP structure awareness
-
+    Evaluate model using fully batched processing for GOP sequences
+    
     Args:
-        gop_size: Group of Pictures size, typically 12 for non-HEVC videos, 10 for HEVC
+        gop_size: Group of Pictures size (12 for UVG)
     """
     model.eval()
     total_loss = 0
     total_mse = 0
     total_bpp = 0
     n_frames = 0
-
+    
     with torch.no_grad():
-        for batch_idx, (frames, frame_indices) in enumerate(test_loader):
-            # Process each sample in the batch
-            for i in range(len(frames)):
-                frame_sequence = frames[i]  # Get sequence of frames for this sample
-                indices = frame_indices[i]  # Get corresponding indices
-
-                # Convert to proper device
-                frame_sequence = [f.to(device) for f in frame_sequence]
-
-                # Initialize reference frame
-                ref_frame = None
-
-                # Process each frame in the sequence according to GOP structure
-                for j, (idx, frame) in enumerate(zip(indices, frame_sequence)):
-                    if idx % gop_size == 0:  # I-frame
-                        # Process as I-frame
-                        i_frame_result = i_frame_model(frame.unsqueeze(0))
-                        ref_frame = i_frame_result["x_hat"]
-
-                        # Skip metrics for I-frames (we're mainly interested in P-frame performance)
-                    else:  # P-frame
-                        if ref_frame is None:
-                            # If we don't have a reference frame yet, skip this frame
-                            continue
-
-                        # Process as P-frame
-                        result = model(ref_frame, frame.unsqueeze(0), training=False, stage=stage)
-
-                        # Update reference frame for next iteration
-                        ref_frame = result["recon_image"]
-
-                        # Calculate metrics for P-frames
-                        loss = result["loss"]
-                        total_loss += loss.item()
-
-                        mse = nn.MSELoss()(result["recon_image"], frame.unsqueeze(0))
-                        total_mse += mse.item()
-
-                        total_bpp += result["bpp"].item()
-
-                        n_frames += 1
-
+        for batch_frames in test_loader:
+            batch_size = batch_frames.size(0)
+            seq_length = batch_frames.size(1)  # Number of frames in sequence
+            
+            # Initialize reference frames
+            reference_frames = None
+            
+            # Process each frame position in the sequence
+            for frame_pos in range(seq_length):
+                # Get all frames at this position from all sequences in the batch
+                current_frames = batch_frames[:, frame_pos, :, :, :].to(device)  # Shape: [B, C, H, W]
+                
+                if frame_pos == 0:  # I-frames
+                    # Process all I-frames in the batch together
+                    i_frame_results = i_frame_model(current_frames)
+                    reference_frames = i_frame_results["x_hat"]  # Shape: [B, C, H, W]
+                else:  # P-frames
+                    # Process all P-frames in the batch with their corresponding reference frames
+                    result = model(reference_frames, current_frames, training=False, stage=stage)
+                    
+                    # Update reference frames for next position
+                    reference_frames = result["recon_image"]  # Shape: [B, C, H, W]
+                    
+                    # Collect statistics
+                    total_loss += result["loss"].item() * batch_size
+                    total_mse += nn.MSELoss()(result["recon_image"], current_frames).item() * batch_size
+                    total_bpp += result["bpp"].item() * batch_size
+                    
+                    n_frames += batch_size
+    
     # Calculate average statistics
     if n_frames > 0:
         avg_loss = total_loss / n_frames
         avg_mse = total_mse / n_frames
-        avg_psnr = -10 * math.log10(avg_mse)
+        avg_psnr = -10 * math.log10(avg_mse) if avg_mse > 0 else 100
         avg_bpp = total_bpp / n_frames
     else:
         avg_loss = 0
         avg_mse = 0
         avg_psnr = 0
         avg_bpp = 0
-
+    
     return {
         "loss": avg_loss,
         "mse": avg_mse,
@@ -362,7 +342,7 @@ def evaluate(model, i_frame_model, test_loader, device, stage, gop_size=12):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='DCVC Training')
+    parser = argparse.ArgumentParser(description='DCVC Training with Full Batch Processing')
     parser.add_argument('--vimeo_dir', type=str, required=True, help='Path to Vimeo-90k dataset')
     parser.add_argument('--septuplet_list', type=str, required=True, help='Path to septuplet list file')
     parser.add_argument('--i_frame_model_name', type=str, default='cheng2020-anchor', help='I-frame model name')
@@ -385,10 +365,8 @@ def main():
     parser.add_argument('--previous_stage_checkpoint', type=str, default=None,
                         help='Path to checkpoint from previous stage to resume from')
     parser.add_argument('--uvg_dir', type=str, required=True, help='Path to UVG dataset')
-    # Add GOP size argument
-    parser.add_argument('--gop_size', type=int, default=12, help='GOP size (12 for non-HEVC, 10 for HEVC)')
     
-    # Add new arguments for resume training and SpyNet initialization
+    # Add arguments for resume training and SpyNet initialization
     parser.add_argument('--resume', type=str, default=None, 
                        help='Path to checkpoint to resume training from')
     parser.add_argument('--spynet_checkpoint', type=str, default=None, 
@@ -412,6 +390,10 @@ def main():
                         help='Patience for ReduceLROnPlateau scheduler')
     parser.add_argument('--lr_warmup_epochs', type=int, default=0,
                         help='Number of warmup epochs with linearly increasing LR')
+    
+    # Add gradient accumulation option
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
+                        help='Number of steps to accumulate gradients (for larger effective batch sizes)')
 
     args = parser.parse_args()
 
@@ -442,28 +424,22 @@ def main():
         septuplet_list=args.septuplet_list,
         transform=transform,
         crop_size=args.crop_size,
+        gop_size=7  # Vimeo90k has 7 frames per sequence
     )
-
-    # Create a custom collate function to handle variable-length sequences
-    def custom_collate_fn(batch):
-        frames_list = [item[0] for item in batch]
-        indices_list = [item[1] for item in batch]
-        return frames_list, indices_list
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.num_workers,
-        pin_memory=True,
-        collate_fn=custom_collate_fn
+        pin_memory=True
     )
 
     # Create test dataset (UVG) with GOP structure
     test_dataset = UVGGOPDataset(
         root_dir=args.uvg_dir,
         transform=transform,
-        gop_size=args.gop_size
+        gop_size=12
     )
 
     test_loader = DataLoader(
@@ -471,12 +447,11 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=True,
-        collate_fn=custom_collate_fn
+        pin_memory=True
     )
 
     # Make script print info about UVG dataset at start
-    print(f"UVG dataset loaded with {len(test_dataset)} frame pairs.")
+    print(f"UVG dataset loaded with {len(test_dataset)} sequences.")
 
     # Load I-frame model
     i_frame_load_checkpoint = torch.load(args.i_frame_model_path, map_location=torch.device('cpu'))
@@ -545,10 +520,12 @@ def main():
         print(f"Initializing motion estimation network with SpyNet weights from DCVC checkpoint: {args.spynet_from_dcvc_checkpoint}")
         spynet_checkpoint = torch.load(args.spynet_from_dcvc_checkpoint, map_location=device)
 
-        for key in list(spynet_checkpoint.keys()):
-            if key.startswith('opticFlow'):
-                spynet_state_dict = {k.replace('opticFlow.', ''): v for k, v in spynet_checkpoint.items()}
-                break        
+        # Extract only SpyNet weights
+        spynet_state_dict = {}
+        for key, value in spynet_checkpoint.items():
+            if key.startswith('opticFlow.'):
+                spynet_state_dict[key.replace('opticFlow.', '')] = value
+        
         model.opticFlow.load_state_dict(spynet_state_dict, strict=True)
         print("Loaded SpyNet weights from DCVC checkpoint into opticFlow component")
 
@@ -608,6 +585,9 @@ def main():
         f.write(f"I-frame model: {args.i_frame_model_path}\n")
         f.write(f"Learning rate: {args.learning_rate}\n")
         f.write(f"LR Scheduler: {args.lr_scheduler}\n")
+        f.write(f"Batch size: {args.batch_size}\n")
+        f.write(f"Gradient accumulation steps: {args.gradient_accumulation_steps}\n")
+        f.write(f"Effective batch size: {args.batch_size * args.gradient_accumulation_steps}\n")
         if args.lr_scheduler != 'none':
             if args.lr_scheduler == 'step':
                 f.write(f"  Step size: {args.lr_step_size}, Gamma: {args.lr_gamma}\n")
@@ -626,7 +606,8 @@ def main():
             f.write(f"Starting from epoch: {start_epoch}\n")
         if args.spynet_checkpoint:
             f.write(f"SpyNet initialization: {args.spynet_checkpoint}\n")
-        f.write(f"UVG dataset: {len(test_dataset)} frame pairs\n")
+        f.write(f"UVG dataset: {len(test_dataset)} sequences\n")
+        f.write(f"Using fully batched GOP processing with parallel P-frame batch processing\n")
         f.write("=" * 80 + "\n")
 
     # Training loop
@@ -641,12 +622,17 @@ def main():
         if warmup_scheduler is not None and epoch < args.lr_warmup_epochs:
             warmup_scheduler.step()
         
-        # Train one epoch with GOP awareness
-        train_stats = train_one_epoch(model, i_frame_model, train_loader, optimizer, device, args.lambda_value,
-                                      args.stage, epoch + 1, args.gop_size)
+        # Train one epoch with fully batched GOP processing
+        train_stats = train_one_epoch_fully_batched(
+            model, i_frame_model, train_loader, optimizer, device, 
+            args.lambda_value, args.stage, epoch + 1, 7,  # Use 7 for Vimeo90k
+            args.gradient_accumulation_steps
+        )
 
-        # Evaluate on test set with GOP awareness
-        test_stats = evaluate(model, i_frame_model, test_loader, device, args.stage, args.gop_size)
+        # Evaluate on test set with fully batched GOP processing
+        test_stats = evaluate_fully_batched(
+            model, i_frame_model, test_loader, device, args.stage, args.gop_size
+        )
 
         # Step scheduler after training (different for ReduceLROnPlateau)
         if scheduler is not None:
@@ -662,13 +648,13 @@ def main():
             f.write(f"  Train MSE: {train_stats['mse']:.6f}\n")
             f.write(f"  Train PSNR: {train_stats['psnr']:.4f}\n")
             f.write(f"  Train BPP: {train_stats['bpp']:.6f}\n")
-            if 'bpp_y' in train_stats:
+            if 'bpp_y' in train_stats and train_stats['bpp_y'] > 0:
                 f.write(f"  Train BPP_y: {train_stats['bpp_y']:.6f}\n")
-            if 'bpp_z' in train_stats:
+            if 'bpp_z' in train_stats and train_stats['bpp_z'] > 0:
                 f.write(f"  Train BPP_z: {train_stats['bpp_z']:.6f}\n")
-            if 'bpp_mv_y' in train_stats:
+            if 'bpp_mv_y' in train_stats and train_stats['bpp_mv_y'] > 0:
                 f.write(f"  Train BPP_mv_y: {train_stats['bpp_mv_y']:.6f}\n")
-            if 'bpp_mv_z' in train_stats:
+            if 'bpp_mv_z' in train_stats and train_stats['bpp_mv_z'] > 0:
                 f.write(f"  Train BPP_mv_z: {train_stats['bpp_mv_z']:.6f}\n")
             f.write(f"  Test Loss: {test_stats['loss']:.6f}\n")
             f.write(f"  Test MSE: {test_stats['mse']:.6f}\n")
@@ -750,7 +736,6 @@ if __name__ == '__main__':
 #   --quality_index 0 \
 #   --stage 1 \
 #   --epochs 50 \
-#   --gop_size 12 \
 #   --model_type psnr \
 #   --batch_size 4 \
 #   --lr_scheduler plateau \
