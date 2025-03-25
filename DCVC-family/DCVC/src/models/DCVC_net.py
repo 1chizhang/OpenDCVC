@@ -301,7 +301,7 @@ class DCVC_net(nn.Module):
                 # Using properties of Laplace distribution for approximation
                 # Laplace distribution has exponential decay in tails, so linear approximation works well
                 # This is consistent with the BitEstimator model characteristics
-                torch.log(prob_clamp) + (p - prob_clamp) / prob_clamp
+                torch.log(torch.tensor(prob_clamp, device=p.device, dtype=p.dtype)) + (p - prob_clamp) / prob_clamp
             )
             return log_p
 
@@ -341,7 +341,7 @@ class DCVC_net(nn.Module):
                 torch.log(torch.clamp(p, min=eps)),
                 # Using first-order Taylor expansion approximation of log around prob_clamp
                 # This is appropriate for the BitEstimator model
-                torch.log(prob_clamp) + (p - prob_clamp) / prob_clamp
+                torch.log(torch.tensor(prob_clamp, device=p.device, dtype=p.dtype)) + (p - prob_clamp) / prob_clamp
             )
             return log_p
 
