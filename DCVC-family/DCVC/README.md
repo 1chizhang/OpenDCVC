@@ -76,6 +76,26 @@ python test_video.py --i_frame_model_name bmshj2018-hyperprior  --i_frame_model_
 ```
 It is recommended that the ```--worker``` number is equal to your GPU number.
 
+# Train DCVC
+
+Example command:
+```bash
+python train_dcvc.py \
+  --vimeo_dir /data/zhan5096/Project/dataset/Vimeo90k/vimeo_septuplet/sequences \
+  --septuplet_list /data/zhan5096/Project/dataset/Vimeo90k/vimeo_septuplet/sep_trainlist.txt \
+  --uvg_dir /data/zhan5096/Project/dataset/UVG/png_sequences \
+  --i_frame_model_path checkpoints/cheng2020-anchor-3-e49be189.pth.tar \
+  --lambda_value 256 \
+  --quality_index 0 \
+  --stage 1 \
+  --epochs 50 \
+  --model_type psnr \
+  --batch_size 4 \
+  --lr_scheduler plateau \
+  --lr_patience 5 \
+  --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_0_psnr.pth \
+  --compile 
+```
 # R-D Curve of DCVC
 ![PSNR RD Curve](assets/rd_curve_psnr.png)
 

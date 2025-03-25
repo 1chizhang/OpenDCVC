@@ -11,6 +11,7 @@ import math
 from PIL import Image
 import torchvision.transforms as transforms
 import time
+from timm.utils import unwrap_model
 
 # Import the model
 from src.models.DCVC_net import DCVC_net
@@ -20,7 +21,7 @@ from src.zoo.image import model_architectures as architectures
 # Add deterministic behavior
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
-os.environ['CUBLAS_WORKSPACE_CONFIG'] = ":4096:8"
+
 
 # Define a dataset class for Vimeo-90k that returns GOP sequences
 class Vimeo90kGOPDataset(torch.utils.data.Dataset):
@@ -136,7 +137,7 @@ class UVGGOPDataset(torch.utils.data.Dataset):
         return torch.stack(frames)  # Return frames as a single tensor [S, C, H, W]
 
 
-def train_one_epoch_fully_batched(model, i_frame_model, train_loader, optimizer, device, lambda_value, stage, epoch, gop_size=7, gradient_accumulation_steps=1):
+def train_one_epoch_fully_batched(model, i_frame_model, train_loader, optimizer, device, stage, epoch, gradient_accumulation_steps=1):
     """
     Train for one epoch with fully batched processing for GOP sequences.
     
@@ -229,8 +230,8 @@ def train_one_epoch_fully_batched(model, i_frame_model, train_loader, optimizer,
                 
                 n_frames += batch_size  # Count all frames in batch
         
-        # Apply accumulated gradients at the end of batch or accumulation step
-        if (batch_idx + 1) % gradient_accumulation_steps == 0 or (batch_idx + 1) == len(train_loader):
+        # Apply accumulated gradients at the accumulation step
+        if (batch_idx + 1) % gradient_accumulation_steps == 0:
             optimizer.step()
         
         # Update total loss
@@ -394,6 +395,8 @@ def main():
     # Add gradient accumulation option
     parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
                         help='Number of steps to accumulate gradients (for larger effective batch sizes)')
+    # torch.compile
+    parser.add_argument('--compile', action='store_true', help='Compile the model')
 
     args = parser.parse_args()
 
@@ -457,6 +460,10 @@ def main():
     i_frame_load_checkpoint = torch.load(args.i_frame_model_path, map_location=torch.device('cpu'))
     i_frame_model = architectures[args.i_frame_model_name].from_state_dict(i_frame_load_checkpoint).eval()
     i_frame_model = i_frame_model.to(device)
+    #compiling i_frame_model
+    if args.compile:
+        print("Compiling the I-frame model...")
+        i_frame_model = torch.compile(i_frame_model)
 
     print(
         f"Training model with lambda = {args.lambda_value}, quality_index = {args.quality_index}, stage = {args.stage}")
@@ -464,6 +471,11 @@ def main():
     # Initialize DCVC model
     model = DCVC_net(lmbda=args.lambda_value)
     model = model.to(device)
+
+    # Compile the model if specified
+    if args.compile:
+        print("Compiling the model...")
+        model = torch.compile(model)
 
     # Initialize optimizer
     if args.stage == 4 and args.previous_stage_checkpoint:
@@ -513,7 +525,7 @@ def main():
         spynet_checkpoint = torch.load(args.spynet_checkpoint, map_location=device)
         
         spynet_state_dict = spynet_checkpoint['state_dict']
-        model.opticFlow.load_state_dict(spynet_state_dict, strict=True)
+        unwrap_model(model).opticFlow.load_state_dict(spynet_state_dict, strict=True)
         print("Loaded SpyNet weights directly into opticFlow component")
     
     if args.spynet_from_dcvc_checkpoint:
@@ -526,7 +538,7 @@ def main():
             if key.startswith('opticFlow.'):
                 spynet_state_dict[key.replace('opticFlow.', '')] = value
         
-        model.opticFlow.load_state_dict(spynet_state_dict, strict=True)
+        unwrap_model(model).opticFlow.load_state_dict(spynet_state_dict, strict=True)
         print("Loaded SpyNet weights from DCVC checkpoint into opticFlow component")
 
     # Resume training from checkpoint if specified
@@ -538,7 +550,7 @@ def main():
             # Check if this is a state_dict only or a complete checkpoint
             if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
                 # Full checkpoint with training state
-                model.load_dict(checkpoint['model_state_dict'])
+                unwrap_model(model).load_dict(checkpoint['model_state_dict'])
                 optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
                 start_epoch = checkpoint['epoch'] + 1  # Start from next epoch
                 best_loss = checkpoint['best_loss']
@@ -550,7 +562,7 @@ def main():
                 print(f"Resumed from epoch {checkpoint['epoch']}, best loss: {best_loss:.6f}")
             else:
                 # State dict only
-                model.load_dict(checkpoint)
+                unwrap_model(model).load_dict(checkpoint)
                 print("Loaded model weights only (no training state)")
         except Exception as e:
             print(f"Error loading checkpoint: {e}")
@@ -560,7 +572,7 @@ def main():
         print(f"Loading model from previous stage checkpoint: {args.previous_stage_checkpoint}")
         try:
             checkpoint = torch.load(args.previous_stage_checkpoint, map_location=device)
-            model.load_dict(checkpoint)  # Use load_dict method as defined in DCVC_net
+            unwrap_model(model).load_dict(checkpoint)  # Use load_dict method as defined in DCVC_net
             print("Successfully loaded model from previous stage")
         except Exception as e:
             print(f"Error loading previous stage checkpoint: {e}")
@@ -624,8 +636,8 @@ def main():
         
         # Train one epoch with fully batched GOP processing
         train_stats = train_one_epoch_fully_batched(
-            model, i_frame_model, train_loader, optimizer, device, 
-            args.lambda_value, args.stage, epoch + 1, 7,  # Use 7 for Vimeo90k
+            model, i_frame_model, train_loader, optimizer, device,
+            args.stage, epoch + 1,  # Use 7 for Vimeo90k
             args.gradient_accumulation_steps
         )
 
@@ -670,7 +682,7 @@ def main():
         # Create save dictionary with all training state
         save_dict = {
             'epoch': epoch,
-            'model_state_dict': model.state_dict(),
+            'model_state_dict': unwrap_model(model).state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'loss': train_stats['loss'],
             'best_loss': best_loss,
@@ -704,7 +716,7 @@ def main():
         args.checkpoint_dir,
         f'model_dcvc_lambda_{args.lambda_value}_quality_{args.quality_index}_stage_{args.stage}.pth'
     )
-    torch.save(model.state_dict(), final_model_path)
+    torch.save(unwrap_model(model).state_dict(), final_model_path)
     print(f"Final model for stage {args.stage} saved to {final_model_path}")
 
     # If this is the final stage (4), also save with the standard naming convention
@@ -713,7 +725,7 @@ def main():
             args.checkpoint_dir,
             f'model_dcvc_quality_{args.quality_index}_{args.model_type}.pth'
         )
-        torch.save(model.state_dict(), standard_model_path)
+        torch.save(unwrap_model(model).state_dict(), standard_model_path)
         print(f"Final model (standard name) saved to {standard_model_path}")
 
     with open(log_file, 'a') as f:
@@ -725,18 +737,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-# Example command:
-# python train_dcvc.py \
-#   --vimeo_dir /data/zhan5096/Project/dataset/Vimeo90k/vimeo_septuplet/sequences \
-#   --septuplet_list /data/zhan5096/Project/dataset/Vimeo90k/vimeo_septuplet/sep_trainlist.txt \
-#   --uvg_dir /data/zhan5096/Project/dataset/UVG/png_sequences \
-#   --i_frame_model_path checkpoints/cheng2020-anchor-3-e49be189.pth.tar \
-#   --lambda_value 256 \
-#   --quality_index 0 \
-#   --stage 1 \
-#   --epochs 50 \
-#   --model_type psnr \
-#   --batch_size 4 \
-#   --lr_scheduler plateau \
-#   --lr_patience 5
