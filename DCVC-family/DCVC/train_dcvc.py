@@ -395,6 +395,23 @@ def main():
                        help='Path to SpyNet pretrained weights to initialize motion estimation network')
     parser.add_argument('--spynet_from_dcvc_checkpoint', type=str, default=None,
                         help='Path to DCVC checkpoint to initialize SpyNet weights')
+    
+    # Add learning rate scheduler arguments
+    parser.add_argument('--lr_scheduler', type=str, default='step', 
+                        choices=['step', 'multistep', 'cosine', 'plateau', 'none'],
+                        help='Type of learning rate scheduler')
+    parser.add_argument('--lr_step_size', type=int, default=5, 
+                        help='Step size for StepLR scheduler')
+    parser.add_argument('--lr_gamma', type=float, default=0.5, 
+                        help='Gamma for StepLR and MultiStepLR schedulers (multiplicative factor)')
+    parser.add_argument('--lr_milestones', type=str, default='5,10,15', 
+                        help='Comma-separated milestone epochs for MultiStepLR scheduler')
+    parser.add_argument('--lr_min_factor', type=float, default=0.01, 
+                        help='Minimum lr factor for CosineAnnealingLR scheduler (as a fraction of initial lr)')
+    parser.add_argument('--lr_patience', type=int, default=2, 
+                        help='Patience for ReduceLROnPlateau scheduler')
+    parser.add_argument('--lr_warmup_epochs', type=int, default=0,
+                        help='Number of warmup epochs with linearly increasing LR')
 
     args = parser.parse_args()
 
@@ -480,6 +497,37 @@ def main():
     else:
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
 
+    # Initialize learning rate scheduler
+    if args.lr_scheduler == 'step':
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=args.lr_step_size, gamma=args.lr_gamma)
+    elif args.lr_scheduler == 'multistep':
+        milestones = [int(m) for m in args.lr_milestones.split(',')]
+        scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=args.lr_gamma)
+    elif args.lr_scheduler == 'cosine':
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=args.epochs, eta_min=args.learning_rate * args.lr_min_factor
+        )
+    elif args.lr_scheduler == 'plateau':
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=args.lr_gamma, patience=args.lr_patience, verbose=True
+        )
+    else:  # 'none' or any other value
+        scheduler = None
+
+    # Create a warmup scheduler if warmup epochs are specified
+    if args.lr_warmup_epochs > 0 and scheduler is not None and args.lr_scheduler != 'plateau':
+        from torch.optim.lr_scheduler import LambdaLR
+        
+        # Create warmup scheduler
+        def warmup_lambda(epoch):
+            if epoch < args.lr_warmup_epochs:
+                return epoch / args.lr_warmup_epochs
+            return 1.0
+
+        warmup_scheduler = LambdaLR(optimizer, lr_lambda=warmup_lambda)
+    else:
+        warmup_scheduler = None
+
     # Initialize starting epoch and best loss
     start_epoch = 0
     best_loss = float('inf')
@@ -517,6 +565,11 @@ def main():
                 optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
                 start_epoch = checkpoint['epoch'] + 1  # Start from next epoch
                 best_loss = checkpoint['best_loss']
+                
+                # Load scheduler state if it exists and scheduler is initialized
+                if scheduler is not None and 'scheduler_state_dict' in checkpoint:
+                    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                
                 print(f"Resumed from epoch {checkpoint['epoch']}, best loss: {best_loss:.6f}")
             else:
                 # State dict only
@@ -553,6 +606,19 @@ def main():
         f.write(f"Model type: {args.model_type}\n")
         f.write(f"Stage: {args.stage} ({stage_descriptions[args.stage]})\n")
         f.write(f"I-frame model: {args.i_frame_model_path}\n")
+        f.write(f"Learning rate: {args.learning_rate}\n")
+        f.write(f"LR Scheduler: {args.lr_scheduler}\n")
+        if args.lr_scheduler != 'none':
+            if args.lr_scheduler == 'step':
+                f.write(f"  Step size: {args.lr_step_size}, Gamma: {args.lr_gamma}\n")
+            elif args.lr_scheduler == 'multistep':
+                f.write(f"  Milestones: {args.lr_milestones}, Gamma: {args.lr_gamma}\n")
+            elif args.lr_scheduler == 'cosine':
+                f.write(f"  Min LR factor: {args.lr_min_factor}\n")
+            elif args.lr_scheduler == 'plateau':
+                f.write(f"  Patience: {args.lr_patience}, Factor: {args.lr_gamma}\n")
+            if args.lr_warmup_epochs > 0:
+                f.write(f"  Warmup epochs: {args.lr_warmup_epochs}\n")
         if args.previous_stage_checkpoint:
             f.write(f"Previous stage checkpoint: {args.previous_stage_checkpoint}\n")
         if args.resume:
@@ -565,12 +631,29 @@ def main():
 
     # Training loop
     for epoch in range(start_epoch, args.epochs):
+        # Log current learning rate
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"Epoch {epoch+1}/{args.epochs} - Learning rate: {current_lr:.6f}")
+        with open(log_file, 'a') as f:
+            f.write(f"Epoch {epoch+1}/{args.epochs} - Learning rate: {current_lr:.6f}\n")
+
+        # Apply warmup scheduler if in warmup phase
+        if warmup_scheduler is not None and epoch < args.lr_warmup_epochs:
+            warmup_scheduler.step()
+        
         # Train one epoch with GOP awareness
         train_stats = train_one_epoch(model, i_frame_model, train_loader, optimizer, device, args.lambda_value,
                                       args.stage, epoch + 1, args.gop_size)
 
         # Evaluate on test set with GOP awareness
         test_stats = evaluate(model, i_frame_model, test_loader, device, args.stage, args.gop_size)
+
+        # Step scheduler after training (different for ReduceLROnPlateau)
+        if scheduler is not None:
+            if args.lr_scheduler == 'plateau':
+                scheduler.step(test_stats['loss'])
+            elif epoch >= args.lr_warmup_epochs:  # Only step main scheduler after warmup
+                scheduler.step()
 
         # Log results
         with open(log_file, 'a') as f:
@@ -597,8 +680,9 @@ def main():
             args.checkpoint_dir,
             f'model_dcvc_lambda_{args.lambda_value}_quality_{args.quality_index}_stage_{args.stage}_latest.pth'
         )
-        # Save full training state for resume capability
-        torch.save({
+        
+        # Create save dictionary with all training state
+        save_dict = {
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
@@ -607,7 +691,14 @@ def main():
             'stage': args.stage,
             'quality_index': args.quality_index,
             'lambda_value': args.lambda_value
-        }, latest_checkpoint_path)
+        }
+        
+        # Add scheduler state if present
+        if scheduler is not None:
+            save_dict['scheduler_state_dict'] = scheduler.state_dict()
+        
+        # Save the checkpoint
+        torch.save(save_dict, latest_checkpoint_path)
 
         # Save best checkpoint if current test loss is the best so far
         if test_stats['loss'] < best_loss:
@@ -617,16 +708,7 @@ def main():
                 f'model_dcvc_lambda_{args.lambda_value}_quality_{args.quality_index}_stage_{args.stage}_best.pth'
             )
             # Save full training state for the best model too
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': test_stats['loss'],
-                'best_loss': best_loss,
-                'stage': args.stage,
-                'quality_index': args.quality_index,
-                'lambda_value': args.lambda_value
-            }, best_checkpoint_path)
+            torch.save(save_dict, best_checkpoint_path)
             print(f"New best model saved with test loss: {best_loss:.6f}")
 
         print(f"Epoch {epoch + 1}/{args.epochs} completed. Latest checkpoint saved.")
@@ -658,7 +740,7 @@ def main():
 if __name__ == '__main__':
     main()
 
-# Example command with resume training and SpyNet initialization:
+# Example command:
 # python train_dcvc.py \
 #   --vimeo_dir /data/zhan5096/Project/dataset/Vimeo90k/vimeo_septuplet/sequences \
 #   --septuplet_list /data/zhan5096/Project/dataset/Vimeo90k/vimeo_septuplet/sep_trainlist.txt \
@@ -667,8 +749,9 @@ if __name__ == '__main__':
 #   --lambda_value 256 \
 #   --quality_index 0 \
 #   --stage 1 \
-#   --epochs 5 \
+#   --epochs 50 \
 #   --gop_size 12 \
 #   --model_type psnr \
 #   --batch_size 4 \
-#   --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_0_psnr.pth
+#   --lr_scheduler plateau \
+#   --lr_patience 5
