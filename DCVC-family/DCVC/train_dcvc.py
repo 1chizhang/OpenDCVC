@@ -358,7 +358,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=10, help='Number of epochs for this stage')
     parser.add_argument('--learning_rate', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--cuda', type=bool, default=True, help='Use CUDA')
-    parser.add_argument('--cuda_device', type=str, default='0', help='CUDA device indices')
+    parser.add_argument('--cuda_device', type=str, default='7', help='CUDA device indices')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of workers for data loading')
     parser.add_argument('--model_type', type=str, default='psnr', choices=['psnr', 'ms-ssim'],
                         help='Model type: psnr or ms-ssim')
