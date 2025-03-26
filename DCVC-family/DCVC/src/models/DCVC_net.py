@@ -189,6 +189,10 @@ class DCVC_net(nn.Module):
         context = self.context_refine(prediction_init)
 
         return context
+    
+    def pixel_motioncompensation(self, ref, mv):
+        warped = flow_warp(ref, mv)
+        return warped
 
     def mv_refine(self, ref, mv):
         return self.mvDecoder_part2(torch.cat((mv, ref), 1)) + mv
@@ -576,6 +580,7 @@ class DCVC_net(nn.Module):
         quant_mv_upsample_refine = self.mv_refine(referframe, quant_mv_upsample)
 
         context = self.motioncompensation(referframe, quant_mv_upsample_refine)
+        pixel_rec = self.pixel_motioncompensation(referframe, quant_mv_upsample_refine)
 
         temporal_prior_params = self.temporalPriorEncoder(context)
 
@@ -626,7 +631,7 @@ class DCVC_net(nn.Module):
         #loss calculation
         if stage == 1:
             #in stage 1, we calculate L_me = lambda*distortion(rec,inp) + bpp_mv_y + bpp_mv_z
-            mse_loss = self.mse(recon_image, input_image)
+            mse_loss = self.mse(pixel_rec, input_image)
             distortion = self.lmbda *255**2*mse_loss
             L_me = distortion + bpp_mv_y + bpp_mv_z
             loss = L_me
