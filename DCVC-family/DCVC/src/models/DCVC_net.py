@@ -632,24 +632,24 @@ class DCVC_net(nn.Module):
         if stage == 1:
             #in stage 1, we calculate L_me = lambda*distortion(rec,inp) + bpp_mv_y + bpp_mv_z
             mse_loss = self.mse(pixel_rec, input_image)
-            distortion = self.lmbda *255**2*mse_loss
+            distortion = self.lmbda *mse_loss
             L_me = distortion + bpp_mv_y + bpp_mv_z
             loss = L_me
         elif stage == 2:
             #in stage 2, we train other modules except mv generation module. at this time, we freeze the mv generation module and calculate L_rec = lambda*distortion(rec,inp)
             mse_loss = self.mse(recon_image, input_image)
-            L_rec = self.lmbda *255**2*mse_loss
+            L_rec = self.lmbda *mse_loss
             loss = L_rec
         elif stage ==3:
             #in stage 3, the mv generation module is still frozen, and we calculate L_con = lambda*distortion(rec,inp) + bpp_y + bpp_z
             mse_loss = self.mse(recon_image, input_image)
-            distortion = self.lmbda *255**2*mse_loss
+            distortion = self.lmbda *mse_loss
             L_con = distortion + bpp_y + bpp_z
             loss = L_con
         elif stage == 4:
             #in stage 4, we train all modules and calculate L_all = lambda*distortion(rec,inp) + bpp
             mse_loss = self.mse(recon_image, input_image)
-            distortion = self.lmbda *255**2*mse_loss
+            distortion = self.lmbda *mse_loss
             L_all = distortion + bpp
             loss = L_all
 
