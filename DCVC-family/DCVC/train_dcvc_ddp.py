@@ -553,7 +553,7 @@ def main():
     # For testing, use gather_all approach to ensure all processes see all data
     test_loader = DataLoader(
         test_dataset,
-        batch_size=args.batch_size,
+        batch_size=1,
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=True
