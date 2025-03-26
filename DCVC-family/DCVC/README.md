@@ -80,7 +80,7 @@ It is recommended that the ```--worker``` number is equal to your GPU number.
 
 Example command:
 ```bash
-python train_dcvc.py \
+python train_dcvc_sq.py \
   --vimeo_dir /home/yichi/Project/dataset/Vimeo90k/vimeo_septuplet/sequences \
   --septuplet_list /home/yichi/Project/dataset/Vimeo90k/vimeo_septuplet/sep_trainlist.txt \
   --uvg_dir /home/yichi/Project/dataset/UVG/png_sequences \
@@ -93,7 +93,8 @@ python train_dcvc.py \
   --batch_size 4 \
   --lr_scheduler plateau \
   --lr_patience 3 \
-  --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_0_psnr.pth
+  --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_0_psnr.pth \
+  --cuda_device 0
 ```
 # R-D Curve of DCVC
 ![PSNR RD Curve](assets/rd_curve_psnr.png)
