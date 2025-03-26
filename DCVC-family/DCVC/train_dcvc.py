@@ -25,7 +25,7 @@ torch.backends.cudnn.benchmark = False
 
 # Define a dataset class for Vimeo-90k that returns GOP sequences
 class Vimeo90kGOPDataset(torch.utils.data.Dataset):
-    def __init__(self, root_dir, septuplet_list, transform=None, crop_size=256, gop_size=7):
+    def __init__(self, root_dir, septuplet_list, transform=None, crop_size=256, gop_size=7, shuffle_frames=True):
         """
         Args:
             root_dir (string): Directory with all the images.
@@ -33,11 +33,13 @@ class Vimeo90kGOPDataset(torch.utils.data.Dataset):
             transform (callable, optional): Optional transform to be applied on a sample.
             crop_size (int): Size of the random crop.
             gop_size (int): GOP size for training.
+            shuffle_frames (bool): Whether to randomly shuffle the order of frames.
         """
         self.root_dir = root_dir
         self.transform = transform
         self.crop_size = crop_size
         self.gop_size = gop_size
+        self.shuffle_frames = shuffle_frames
         self.septuplet_list = []
 
         with open(septuplet_list, 'r') as f:
@@ -72,6 +74,18 @@ class Vimeo90kGOPDataset(torch.utils.data.Dataset):
         # Apply transform if provided
         if self.transform:
             frames = [self.transform(img) for img in frames]
+            
+        # Random shuffle frame order if enabled
+        if self.shuffle_frames:
+            # Create a list of indices and shuffle it
+            frame_indices = list(range(len(frames)))
+            random.shuffle(frame_indices)
+            
+            # Reorder frames according to shuffled indices
+            frames = [frames[i] for i in frame_indices]
+            
+            # Option: You could also return the shuffle indices if needed for reconstruction
+            # return torch.stack(frames), frame_indices
 
         return torch.stack(frames)  # Return frames as a single tensor [S, C, H, W]
 
