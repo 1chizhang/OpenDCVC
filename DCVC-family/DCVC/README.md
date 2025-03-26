@@ -88,13 +88,12 @@ python train_dcvc.py \
   --lambda_value 256 \
   --quality_index 0 \
   --stage 1 \
-  --epochs 50 \
+  --epochs 20 \
   --model_type psnr \
   --batch_size 4 \
   --lr_scheduler plateau \
-  --lr_patience 5 \
-  --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_0_psnr.pth \
-  --compile 
+  --lr_patience 3 \
+  --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_0_psnr.pth
 ```
 # R-D Curve of DCVC
 ![PSNR RD Curve](assets/rd_curve_psnr.png)
