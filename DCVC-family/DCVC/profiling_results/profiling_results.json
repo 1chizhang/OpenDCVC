@@ -1,0 +1,158 @@
+{
+  "timing": {
+    "opticFlow": {
+      "avg_time": 0.00393674373626709,
+      "std_time": 1.560957227193189e-05
+    },
+    "feature_extract": {
+      "avg_time": 0.0008573770523071289,
+      "std_time": 2.6821072877030758e-05
+    },
+    "context_refine": {
+      "avg_time": 0.001778888702392578,
+      "std_time": 1.1523290608973096e-06
+    },
+    "mvEncoder": {
+      "avg_time": 0.004434728622436523,
+      "std_time": 3.2735869370894235e-05
+    },
+    "mvpriorEncoder": {
+      "avg_time": 0.004556202888488769,
+      "std_time": 0.00013018883351945479
+    },
+    "mvpriorDecoder": {
+      "avg_time": 0.0045853137969970705,
+      "std_time": 6.0654717412621076e-05
+    },
+    "mvDecoder_part1": {
+      "avg_time": 0.005704617500305176,
+      "std_time": 0.0018756529918258417
+    },
+    "mv_refine": {
+      "avg_time": 0.006736087799072266,
+      "std_time": 4.281506478357438e-05
+    },
+    "motioncompensation": {
+      "avg_time": 0.008527922630310058,
+      "std_time": 5.527631279678381e-05
+    },
+    "temporalPriorEncoder": {
+      "avg_time": 0.009085631370544434,
+      "std_time": 0.0001054978612862122
+    },
+    "contextualEncoder": {
+      "avg_time": 0.009511971473693847,
+      "std_time": 6.440430781334388e-05
+    },
+    "priorEncoder": {
+      "avg_time": 0.009612774848937989,
+      "std_time": 9.713685844279047e-05
+    },
+    "priorDecoder": {
+      "avg_time": 0.009636330604553222,
+      "std_time": 3.06895836436842e-05
+    },
+    "auto_regressive": {
+      "avg_time": 0.009571337699890136,
+      "std_time": 7.185632604993179e-05
+    },
+    "auto_regressive_mv": {
+      "avg_time": 0.004476070404052734,
+      "std_time": 1.7830458257950054e-05
+    },
+    "entropy_parameters": {
+      "avg_time": 0.02592930793762207,
+      "std_time": 0.00017328200001622893
+    },
+    "entropy_parameters_mv": {
+      "avg_time": 0.008440732955932617,
+      "std_time": 6.716933078720669e-05
+    },
+    "contextualDecoder_part1": {
+      "avg_time": 0.010282397270202637,
+      "std_time": 9.623651578850451e-05
+    },
+    "contextualDecoder_part2": {
+      "avg_time": 0.019808340072631835,
+      "std_time": 0.00048153339450070605
+    },
+    "full_forward": {
+      "avg_time": 0.01741635799407959,
+      "std_time": 0.00032414349152485537
+    }
+  },
+  "parameters": {
+    "bitEstimator_z": 704,
+    "bitEstimator_z_mv": 704,
+    "feature_extract": 75648,
+    "context_refine": 110784,
+    "mvEncoder": 494720,
+    "mvDecoder_part1": 494594,
+    "mvDecoder_part2": 188738,
+    "contextualEncoder": 626080,
+    "contextualDecoder_part1": 824768,
+    "contextualDecoder_part2": 223235,
+    "priorEncoder": 260288,
+    "priorDecoder": 467232,
+    "mvpriorEncoder": 278720,
+    "mvpriorDecoder": 477600,
+    "entropy_parameters": 254720,
+    "auto_regressive": 460992,
+    "auto_regressive_mv": 819456,
+    "entropy_parameters_mv": 451697,
+    "temporalPriorEncoder": 473568,
+    "opticFlow": 960200
+  },
+  "total_parameters": 7944448,
+  "resolution_scaling": {
+    "256x256": {
+      "time": 0.017312288284301758,
+      "memory": 1431.1865234375,
+      "pixels": 65536
+    },
+    "512x512": {
+      "time": 0.09750247001647949,
+      "memory": 5607.37060546875,
+      "pixels": 262144
+    },
+    "1024x1024": {
+      "time": 0.20458388328552246,
+      "memory": 22306.94482421875,
+      "pixels": 1048576
+    },
+    "1920x1024": {
+      "time": 0.3875563144683838,
+      "memory": 41819.13427734375,
+      "pixels": 1966080
+    }
+  },
+  "batch_scaling": {
+    "1": {
+      "time": 0.020555734634399414,
+      "memory": 1462.3583984375,
+      "time_per_frame": 0.020555734634399414
+    },
+    "2": {
+      "time": 0.14110279083251953,
+      "memory": 2854.50732421875,
+      "time_per_frame": 0.07055139541625977
+    },
+    "4": {
+      "time": 0.14303827285766602,
+      "memory": 5641.53076171875,
+      "time_per_frame": 0.035759568214416504
+    },
+    "8": {
+      "time": 0.17198777198791504,
+      "memory": 11205.81982421875,
+      "time_per_frame": 0.02149847149848938
+    }
+  },
+  "memory": {
+    "opticFlow": 72.62548828125,
+    "mvEncoder": 96.970703125,
+    "contextualEncoder": 480.92333984375,
+    "contextualDecoder_part1": 548.23046875,
+    "full_forward": 718.927734375
+  }
+}

@@ -95,6 +95,26 @@ python train_dcvc.py \
   --lr_patience 3 \
   --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_0_psnr.pth
 ```
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 train_dcvc_ddp.py \
+  --vimeo_dir /data/zhan5096/Project/dataset/Vimeo90k/vimeo_septuplet/sequences \
+  --septuplet_list /data/zhan5096/Project/dataset/Vimeo90k/vimeo_septuplet/sep_trainlist.txt \
+  --uvg_dir /data/zhan5096/Project/dataset/UVG/png_sequences \
+  --i_frame_model_path checkpoints/cheng2020-anchor-3-e49be189.pth.tar \
+  --lambda_value 256 \
+  --quality_index 0 \
+  --stage 1 \
+  --epochs 20 \
+  --model_type psnr \
+  --batch_size 4 \
+  --learning_rate 2e-4 \
+  --lr_scheduler plateau \
+  --lr_patience 3 \
+  --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_0_psnr.pth
+```
+
+
+
 # R-D Curve of DCVC
 ![PSNR RD Curve](assets/rd_curve_psnr.png)
 
