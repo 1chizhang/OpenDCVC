@@ -278,7 +278,7 @@ def train_one_epoch_fully_batched(model, i_frame_model, train_loader, optimizer,
     }
 
 
-def evaluate_fully_batched(model, i_frame_model, test_loader, device, stage, gop_size=12):
+def evaluate_fully_batched(model, i_frame_model, test_loader, device, stage):
     """
     Evaluate model using fully batched processing for GOP sequences
     
@@ -643,7 +643,7 @@ def main():
 
         # Evaluate on test set with fully batched GOP processing
         test_stats = evaluate_fully_batched(
-            model, i_frame_model, test_loader, device, args.stage, args.gop_size
+            model, i_frame_model, test_loader, device, args.stage
         )
 
         # Step scheduler after training (different for ReduceLROnPlateau)
