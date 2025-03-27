@@ -215,7 +215,7 @@ class DCVC_net(nn.Module):
         outputs = outputs.int()
         return outputs
 
-    def feature_probs_based_sigma(self, feature, mean, sigma, training=True, bin_size=1.0, prob_clamp=1e-6):
+    def feature_probs_based_sigma(self, feature, mean, sigma, training=True, bin_size=1.0, prob_clamp=1e-6,nosie = None):
         """
         A numerically stable version of the feature probability calculation based on sigma.
 
@@ -240,9 +240,15 @@ class DCVC_net(nn.Module):
         sigma = check_sigma(sigma.float())
 
         # Apply quantization based on training mode
-        outputs = self.quantize(
-            feature, "noise" if training else "dequantize", mean
-        )
+        if training:
+            if nosie is not None:
+                feature = feature + nosie
+            else:
+                raise ValueError("Noise tensor is required for training mode")
+        else:
+            outputs = self.quantize(
+                feature,  "dequantize", mean
+            )
 
         # Compute centered values
         values = outputs - mean
@@ -563,7 +569,8 @@ class DCVC_net(nn.Module):
 
         # quant_mv = torch.round(mvfeature)
         if training == True:
-            quant_mv = mvfeature + torch.empty_like(mvfeature).uniform_(-0.5, 0.5)
+            quant_mv_noise = torch.empty_like(mvfeature).uniform_(-0.5, 0.5)
+            quant_mv = mvfeature + quant_mv_noise
         else:
             quant_mv = torch.round(mvfeature)
 
@@ -597,7 +604,8 @@ class DCVC_net(nn.Module):
 
         # compressed_y_renorm = torch.round(feature_renorm)
         if training == True:
-            compressed_y_renorm = feature_renorm + torch.empty_like(feature_renorm).uniform_(-0.5, 0.5)
+            compressed_y_renorm_noise = torch.empty_like(feature_renorm).uniform_(-0.5, 0.5)
+            compressed_y_renorm = feature_renorm + compressed_y_renorm_noise
         else:
             compressed_y_renorm = torch.round(feature_renorm)
 
@@ -613,8 +621,8 @@ class DCVC_net(nn.Module):
         recon_image = self.contextualDecoder_part2(torch.cat((recon_image_feature, context), dim=1))
 
         total_bits_y, _ = self.feature_probs_based_sigma(
-            feature_renorm, means_hat, scales_hat,training=training)
-        total_bits_mv, _ = self.feature_probs_based_sigma(mvfeature, means_hat_mv, scales_hat_mv,training=training)
+            feature_renorm, means_hat, scales_hat,training=training,noise = compressed_y_renorm_noise if training else None)
+        total_bits_mv, _ = self.feature_probs_based_sigma(mvfeature, means_hat_mv, scales_hat_mv,training=training, noise = quant_mv_noise if training else None)
         total_bits_z, _ = self.iclr18_estrate_bits_z(compressed_z)
         total_bits_z_mv, _ = self.iclr18_estrate_bits_z_mv(compressed_z_mv)
 
