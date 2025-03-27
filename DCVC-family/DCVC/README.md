@@ -96,7 +96,7 @@ python train_dcvc.py \
   --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_0_psnr.pth
 ```
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 train_dcvc_ddp.py \
+torchrun --nproc_per_node=4 train_dcvc_sq_2to7_data_ddp.py \
   --vimeo_dir /data/zhan5096/Project/dataset/Vimeo90k/vimeo_septuplet/sequences \
   --septuplet_list /data/zhan5096/Project/dataset/Vimeo90k/vimeo_septuplet/sep_trainlist.txt \
   --uvg_dir /data/zhan5096/Project/dataset/UVG/png_sequences \
@@ -107,10 +107,11 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 train_dcvc_ddp.py \
   --epochs 20 \
   --model_type psnr \
   --batch_size 4 \
-  --learning_rate 2e-4 \
+  --learning_rate 4e-4 \
   --lr_scheduler plateau \
   --lr_patience 3 \
-  --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_0_psnr.pth
+  --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_0_psnr.pth \
+  --find_unused_parameters
 ```
 
 ```bash
@@ -129,6 +130,8 @@ python train_dcvc_test.py \
   --lr_patience 3 \
   --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_0_psnr.pth
 ```
+
+
 
 # R-D Curve of DCVC
 ![PSNR RD Curve](assets/rd_curve_psnr.png)
