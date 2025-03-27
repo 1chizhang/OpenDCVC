@@ -215,7 +215,7 @@ class DCVC_net(nn.Module):
         outputs = outputs.int()
         return outputs
 
-    def feature_probs_based_sigma(self, feature, mean, sigma, training=True, bin_size=1.0, prob_clamp=1e-6,nosie = None):
+    def feature_probs_based_sigma(self, feature, mean, sigma, training=True, bin_size=1.0, prob_clamp=1e-6,noise = None):
         """
         A numerically stable version of the feature probability calculation based on sigma.
 
@@ -241,8 +241,8 @@ class DCVC_net(nn.Module):
 
         # Apply quantization based on training mode
         if training:
-            if nosie is not None:
-                feature = feature + nosie
+            if noise is not None:
+                outputs = feature + noise
             else:
                 raise ValueError("Noise tensor is required for training mode")
         else:
@@ -642,23 +642,27 @@ class DCVC_net(nn.Module):
             mse_loss = self.mse(pixel_rec, input_image)
             distortion = self.lmbda *mse_loss
             L_me = distortion + bpp_mv_y + bpp_mv_z
+            bpp_train = bpp_mv_y + bpp_mv_z
             loss = L_me
         elif stage == 2:
             #in stage 2, we train other modules except mv generation module. at this time, we freeze the mv generation module and calculate L_rec = lambda*distortion(rec,inp)
             mse_loss = self.mse(recon_image, input_image)
             L_rec = self.lmbda *mse_loss
+            bpp_train = 0
             loss = L_rec
         elif stage ==3:
             #in stage 3, the mv generation module is still frozen, and we calculate L_con = lambda*distortion(rec,inp) + bpp_y + bpp_z
             mse_loss = self.mse(recon_image, input_image)
             distortion = self.lmbda *mse_loss
             L_con = distortion + bpp_y + bpp_z
+            bpp_train = bpp_y + bpp_z
             loss = L_con
         elif stage == 4:
             #in stage 4, we train all modules and calculate L_all = lambda*distortion(rec,inp) + bpp
             mse_loss = self.mse(recon_image, input_image)
             distortion = self.lmbda *mse_loss
             L_all = distortion + bpp
+            bpp_train = bpp
             loss = L_all
 
 
@@ -669,7 +673,9 @@ class DCVC_net(nn.Module):
                 "bpp": bpp,
                 "recon_image": recon_image,
                 "context": context,
-                "loss": loss
+                "loss": loss,
+                "mse_loss": mse_loss,
+                "bpp_train": bpp_train,
                 }
 
     def load_dict(self, pretrained_dict):

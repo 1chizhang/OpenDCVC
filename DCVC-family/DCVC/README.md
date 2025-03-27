@@ -80,7 +80,7 @@ It is recommended that the ```--worker``` number is equal to your GPU number.
 
 Example command:
 ```bash
-python train_dcvc_sq.py \
+python train_dcvc_sq_2to7.py \
   --vimeo_dir /home/yichi/Project/dataset/Vimeo90k/vimeo_septuplet/sequences \
   --septuplet_list /home/yichi/Project/dataset/Vimeo90k/vimeo_septuplet/sep_trainlist.txt \
   --uvg_dir /home/yichi/Project/dataset/UVG/png_sequences \
@@ -95,6 +95,24 @@ python train_dcvc_sq.py \
   --lr_patience 3 \
   --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_0_psnr.pth \
   --cuda_device 0
+```
+
+```bash
+python train_dcvc_sq_2to7_data.py \
+  --vimeo_dir /home/yichi/Project/dataset/Vimeo90k/vimeo_septuplet/sequences \
+  --septuplet_list /home/yichi/Project/dataset/Vimeo90k/vimeo_septuplet/sep_trainlist.txt \
+  --uvg_dir /home/yichi/Project/dataset/UVG/png_sequences \
+  --i_frame_model_path checkpoints/cheng2020-anchor-3-e49be189.pth.tar \
+  --lambda_value 256 \
+  --quality_index 0 \
+  --stage 1 \
+  --epochs 20 \
+  --model_type psnr \
+  --batch_size 4 \
+  --lr_scheduler plateau \
+  --lr_patience 3 \
+  --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_0_psnr.pth \
+  --cuda_device 1
 ```
 # R-D Curve of DCVC
 ![PSNR RD Curve](assets/rd_curve_psnr.png)
