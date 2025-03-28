@@ -397,7 +397,7 @@ def evaluate_fully_batched(model, i_frame_model, test_loader, device, stage, fin
                         # Collect statistics
                         total_loss += result["loss"].item() * batch_size
                         total_mse += result["mse_loss"].item() * batch_size
-                        total_bpp += result["bpp"].item() * batch_size
+                        total_bpp += result["bpp_train"].item() * batch_size
                         total_psnr += -10 * math.log10(result["mse_loss"].item()) * batch_size
                         n_frames += batch_size
     
