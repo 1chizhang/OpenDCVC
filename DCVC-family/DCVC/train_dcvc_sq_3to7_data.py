@@ -820,7 +820,7 @@ def main():
         # Step scheduler after training (different for ReduceLROnPlateau)
         if scheduler is not None:
             if args.lr_scheduler == 'plateau':
-                scheduler.step(test_stats['loss'])
+                scheduler.step(test_stats_three['loss'])
             elif epoch >= args.lr_warmup_epochs:  # Only step main scheduler after warmup
                 scheduler.step()
 
