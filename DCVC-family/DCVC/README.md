@@ -112,7 +112,8 @@ python train_dcvc_sq_2to7_data.py \
   --lr_scheduler plateau \
   --lr_patience 3 \
   --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_0_psnr.pth \
-  --cuda_device 1
+  --cuda_device 1 \
+  --resume /home/yichi/Project/OpenDCVC/DCVC-family/DCVC/results/checkpoints_data/model_dcvc_lambda_256.0_quality_0_stage_1_latest.pth
 ```
 
 ```bash
