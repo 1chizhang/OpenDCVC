@@ -114,7 +114,7 @@ torchrun --nproc_per_node=4 train_dcvc_sq_2to7_data_ddp.py \
   --find_unused_parameters
 ```
 ```bash
-CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 --master_port=19500 train_dcvc_sq_2to7_data_ddp_amp.py \
+CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 --master_port=19500 train_dcvc_sq_3to7_data_ddp.py \
   --vimeo_dir /data/zhan5096/Project/dataset/Vimeo90k/vimeo_septuplet/sequences \
   --septuplet_list /data/zhan5096/Project/dataset/Vimeo90k/vimeo_septuplet/sep_trainlist.txt \
   --uvg_dir /data/zhan5096/Project/dataset/UVG/png_sequences \
@@ -129,8 +129,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 --master_port=19500 tra
   --lr_scheduler plateau \
   --lr_patience 3 \
   --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_0_psnr.pth \
-  --find_unused_parameters \
-  --amp
+  --find_unused_parameters
 ```
 
 
