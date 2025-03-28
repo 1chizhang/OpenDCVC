@@ -875,8 +875,8 @@ def main():
         torch.save(save_dict, latest_checkpoint_path)
 
         # Save best checkpoint if current test loss is the best so far
-        if test_stats['loss'] < best_loss:
-            best_loss = test_stats['loss']
+        if test_stats_three['loss'] < best_loss:
+            best_loss = test_stats_three['loss']
             best_checkpoint_path = os.path.join(
                 args.checkpoint_dir,
                 f'model_dcvc_lambda_{args.lambda_value}_quality_{args.quality_index}_stage_{args.stage}_best.pth'
