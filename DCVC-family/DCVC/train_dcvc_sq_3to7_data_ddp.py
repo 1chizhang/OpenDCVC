@@ -333,8 +333,106 @@ def train_one_epoch_fully_batched(model, i_frame_model, train_loader, optimizer,
         "bpp": avg_bpp,
     }
 
-
 def evaluate_fully_batched(model, i_frame_model, test_loader, device, stage, finetune=False, distributed=False):
+    """
+    Evaluate model using fully batched processing for GOP sequences
+    
+    Args:
+        gop_size: Group of Pictures size (12 for UVG)
+    """
+    model.eval()
+    total_loss = 0
+    total_mse = 0
+    total_bpp = 0
+    total_psnr = 0
+    n_frames = 0
+    
+    with torch.no_grad():
+        for batch_frames in test_loader:
+            batch_size = batch_frames.size(0)
+            seq_length = batch_frames.size(1)  # Number of frames in sequence
+            
+            # Initialize reference frames
+            reference_frames = None
+            
+            if finetune and stage == 4: 
+                # Real coding order
+                # Process each frame position in the sequence
+                for frame_pos in range(seq_length):
+                    # Get all frames at this position from all sequences in the batch
+                    current_frames = batch_frames[:, frame_pos, :, :, :].to(device)  # Shape: [B, C, H, W]
+                    
+                    if frame_pos == 0:  # I-frames
+                        # Process all I-frames in the batch together
+                        i_frame_results = i_frame_model(current_frames)
+                        reference_frames = i_frame_results["x_hat"]  # Shape: [B, C, H, W]
+                    else:  # P-frames
+                        # Process all P-frames in the batch with their corresponding reference frames
+                        result = model(reference_frames, current_frames, training=False, stage=stage)
+                        
+                        # Update reference frames for next position
+                        reference_frames = result["recon_image"]  # Shape: [B, C, H, W]
+                        
+                        # Collect statistics
+                        total_loss += result["loss"].item() * batch_size
+                        total_mse += result["mse_loss"].item() * batch_size
+                        total_bpp += result["bpp_train"].item() * batch_size
+                        total_psnr += -10 * math.log10(result["mse_loss"].item()) * batch_size
+                        
+                        n_frames += batch_size
+            else:
+                # Two frame evaluation
+                # Process each frame position in the sequence
+                for frame_pos in range(seq_length):
+                    if frame_pos == 0:
+                        continue
+                    else:
+                        previous_frames = batch_frames[:, frame_pos - 1, :, :, :].to(device)
+                        current_frames = batch_frames[:, frame_pos, :, :, :].to(device)
+                        # process previous frames by I-frame model
+                        i_frame_results = i_frame_model(previous_frames)
+                        reference_frames = i_frame_results["x_hat"]  # Shape: [B, C, H, W]
+                        # Process all P-frames in the batch with their corresponding reference frames
+                        result = model(reference_frames, current_frames, training=False, stage=stage)
+                        # Collect statistics
+                        total_loss += result["loss"].item() * batch_size
+                        total_mse += result["mse_loss"].item() * batch_size
+                        total_bpp += result["bpp"].item() * batch_size
+                        total_psnr += -10 * math.log10(result["mse_loss"].item()) * batch_size
+                        n_frames += batch_size
+    
+    # Aggregate statistics across all processes in distributed mode
+    if distributed:
+        # Create tensors to hold the values
+        stats_tensor = torch.tensor([total_loss, total_mse, total_bpp, total_psnr, n_frames], dtype=torch.float64, device=device)
+        
+        # All-reduce to sum the tensors across all processes
+        dist.all_reduce(stats_tensor, op=dist.ReduceOp.SUM)
+        
+        # Extract values back
+        total_loss, total_mse, total_bpp, total_psnr, n_frames = stats_tensor.tolist()
+    
+    # Calculate average statistics
+    if n_frames > 0:
+        avg_loss = total_loss / n_frames
+        avg_mse = total_mse / n_frames
+        avg_psnr = -10 * math.log10(avg_mse) if avg_mse > 0 else 100
+        avg_bpp = total_bpp / n_frames
+    else:
+        avg_loss = 0
+        avg_mse = 0
+        avg_psnr = 0
+        avg_bpp = 0
+    
+    return {
+        "loss": avg_loss,
+        "mse": avg_mse,
+        "psnr": avg_psnr,
+        "bpp": avg_bpp
+    }
+
+
+def evaluate_fully_batched_three(model, i_frame_model, test_loader, device, stage, finetune=False, distributed=False):
     """
     Evaluate model using fully batched processing for GOP sequences
     
@@ -858,10 +956,16 @@ def main():
             distributed=(args.local_rank != -1)
         )
 
+        # Evaluate on test set with fully batched three frame processing
+        test_stats_three = evaluate_fully_batched_three(
+            model, i_frame_model, test_loader, device, args.stage, args.finetune,
+            distributed=(args.local_rank != -1)
+        )
+
         # Step scheduler after training (different for ReduceLROnPlateau)
         if scheduler is not None:
             if args.lr_scheduler == 'plateau':
-                scheduler.step(test_stats['loss'])
+                scheduler.step(test_stats_three['loss'])
             elif epoch >= args.lr_warmup_epochs:  # Only step main scheduler after warmup
                 scheduler.step()
 
@@ -885,6 +989,12 @@ def main():
                 f.write(f"  Test MSE: {test_stats['mse']:.6f}\n")
                 f.write(f"  Test PSNR: {test_stats['psnr']:.4f}\n")
                 f.write(f"  Test BPP: {test_stats['bpp']:.6f}\n")
+                f.write(f"  Test Loss (3F): {test_stats_three['loss']:.6f}\n")
+                f.write(f"  Test MSE (3F): {test_stats_three['mse']:.6f}\n")
+                f.write(f"  Test PSNR (3F): {test_stats_three['psnr']:.4f}\n")
+                f.write(f"  Test BPP (3F): {test_stats_three['bpp']:.6f}\n")
+                f.write("=" * 80 + "\n")
+
 
             # Save latest checkpoint with training state for resuming (only on rank 0)
             latest_checkpoint_path = os.path.join(
@@ -918,8 +1028,8 @@ def main():
             torch.save(save_dict, latest_checkpoint_path)
 
             # Save best checkpoint if current test loss is the best so far
-            if test_stats['loss'] < best_loss:
-                best_loss = test_stats['loss']
+            if test_stats_three['loss'] < best_loss:
+                best_loss = test_stats_three['loss']
                 best_checkpoint_path = os.path.join(
                     args.checkpoint_dir,
                     f'model_dcvc_lambda_{args.lambda_value}_quality_{args.quality_index}_stage_{args.stage}_best.pth'
