@@ -676,6 +676,7 @@ class DCVC_net(nn.Module):
                 "loss": loss,
                 "mse_loss": mse_loss,
                 "bpp_train": bpp_train,
+                "pixel_rec": pixel_rec,
                 }
 
     def load_dict(self, pretrained_dict):
