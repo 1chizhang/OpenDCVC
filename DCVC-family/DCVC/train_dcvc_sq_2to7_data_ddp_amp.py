@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
+from torch.cuda.amp import autocast, GradScaler  # Import AMP components
 import numpy as np
 from tqdm import tqdm
 import random
@@ -156,13 +157,16 @@ class UVGGOPDataset(torch.utils.data.Dataset):
 
 
 def train_one_epoch_fully_batched(model, i_frame_model, train_loader, optimizer, device, stage, epoch, 
-                                 gradient_accumulation_steps=1, finetune=False, distributed=False, world_size=1):
+                                 gradient_accumulation_steps=1, finetune=False, distributed=False, world_size=1,
+                                 scaler=None, use_amp=False):  # Added AMP parameters
     """
     Train for one epoch with fully batched processing for GOP sequences.
     
     Args:
         gop_size: Group of Pictures size (7 for Vimeo90k)
         gradient_accumulation_steps: Number of steps to accumulate gradients
+        scaler: GradScaler for Automatic Mixed Precision
+        use_amp: Flag to enable autocast for mixed precision
     """
     model.train()
     total_loss = 0
@@ -213,25 +217,31 @@ def train_one_epoch_fully_batched(model, i_frame_model, train_loader, optimizer,
                 if frame_pos == 0:  # First frame (I-frame) in each sequence
                     # Process all I-frames in the batch together
                     with torch.no_grad():  # Don't train I-frame model
-                        i_frame_results = i_frame_model(current_frames)
+                        # Use autocast for I-frame if using AMP
+                        with autocast(enabled=use_amp):
+                            i_frame_results = i_frame_model(current_frames)
                         reference_frames = i_frame_results["x_hat"]  # Shape: [B, C, H, W]
                 else:  # P-frames
                     # Zero gradients for each frame position
                     optimizer.zero_grad()
 
                     # Process all P-frames in the batch with their corresponding reference frames
-                    # DCVC model expects reference and current frames in the same batch size
-                    result = model(reference_frames, current_frames, training=True, stage=stage)
+                    # Use autocast for forward pass if using AMP
+                    with autocast(enabled=use_amp):
+                        result = model(reference_frames, current_frames, training=True, stage=stage)
+                        loss = result["loss"]
                     
                     # Update reference frames for next position with the reconstructed frames
                     reference_frames = result["recon_image"].detach()  # Shape: [B, C, H, W]
                     
-                    # Calculate loss (already accounts for batch size, just normalize by accumulation steps)
-                    loss = result["loss"]
-                    loss.backward()
-                    
-                    # Apply optimizer step for each frame position
-                    optimizer.step()
+                    # Handle backward with scaler if using AMP
+                    if use_amp:
+                        scaler.scale(loss).backward()
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        loss.backward()
+                        optimizer.step()
 
                     # Collect statistics
                     batch_loss += result["loss"].item()
@@ -252,21 +262,28 @@ def train_one_epoch_fully_batched(model, i_frame_model, train_loader, optimizer,
                     current_frames = batch_frames[:, frame_pos, :, :, :].to(device)  # Shape: [B, C, H, W]
                     # process previous frames by I-frame model
                     with torch.no_grad():  # Don't train I-frame model
-                        i_frame_results = i_frame_model(previous_frames)
+                        # Use autocast for I-frame if using AMP
+                        with autocast(enabled=use_amp):
+                            i_frame_results = i_frame_model(previous_frames)
                         reference_frames = i_frame_results["x_hat"]  # Shape: [B, C, H, W]
+                    
                     # Zero gradients for each frame position
                     optimizer.zero_grad()
 
                     # Process all P-frames in the batch with their corresponding reference frames
-                    # DCVC model expects reference and current frames in the same batch size
-                    result = model(reference_frames, current_frames, training=True, stage=stage)
+                    # Use autocast for forward pass if using AMP
+                    with autocast(enabled=use_amp):
+                        result = model(reference_frames, current_frames, training=True, stage=stage)
+                        loss = result["loss"]
 
-                    # Calculate loss (already accounts for batch size, just normalize by accumulation steps)
-                    loss = result["loss"]
-                    loss.backward()
-
-                    # Apply optimizer step for each frame position
-                    optimizer.step()
+                    # Handle backward with scaler if using AMP
+                    if use_amp:
+                        scaler.scale(loss).backward()
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        loss.backward()
+                        optimizer.step()
 
                     # Collect statistics
                     batch_loss += result["loss"].item()
@@ -321,12 +338,14 @@ def train_one_epoch_fully_batched(model, i_frame_model, train_loader, optimizer,
     }
 
 
-def evaluate_fully_batched(model, i_frame_model, test_loader, device, stage, finetune=False, distributed=False):
+def evaluate_fully_batched(model, i_frame_model, test_loader, device, stage, finetune=False, distributed=False, 
+                           use_amp=False):  # AMP parameter defaults to False for evaluation
     """
     Evaluate model using fully batched processing for GOP sequences
     
     Args:
         gop_size: Group of Pictures size (12 for UVG)
+        use_amp: Flag to enable autocast for mixed precision
     """
     model.eval()
     total_loss = 0
@@ -352,11 +371,15 @@ def evaluate_fully_batched(model, i_frame_model, test_loader, device, stage, fin
                     
                     if frame_pos == 0:  # I-frames
                         # Process all I-frames in the batch together
-                        i_frame_results = i_frame_model(current_frames)
+                        # Use autocast for I-frame if using AMP
+                        with autocast(enabled=use_amp):
+                            i_frame_results = i_frame_model(current_frames)
                         reference_frames = i_frame_results["x_hat"]  # Shape: [B, C, H, W]
                     else:  # P-frames
                         # Process all P-frames in the batch with their corresponding reference frames
-                        result = model(reference_frames, current_frames, training=False, stage=stage)
+                        # Use autocast for P-frames if using AMP
+                        with autocast(enabled=use_amp):
+                            result = model(reference_frames, current_frames, training=False, stage=stage)
                         
                         # Update reference frames for next position
                         reference_frames = result["recon_image"]  # Shape: [B, C, H, W]
@@ -378,10 +401,16 @@ def evaluate_fully_batched(model, i_frame_model, test_loader, device, stage, fin
                         previous_frames = batch_frames[:, frame_pos - 1, :, :, :].to(device)
                         current_frames = batch_frames[:, frame_pos, :, :, :].to(device)
                         # process previous frames by I-frame model
-                        i_frame_results = i_frame_model(previous_frames)
+                        # Use autocast for I-frame if using AMP
+                        with autocast(enabled=use_amp):
+                            i_frame_results = i_frame_model(previous_frames)
                         reference_frames = i_frame_results["x_hat"]  # Shape: [B, C, H, W]
+                        
                         # Process all P-frames in the batch with their corresponding reference frames
-                        result = model(reference_frames, current_frames, training=False, stage=stage)
+                        # Use autocast for P-frames if using AMP
+                        with autocast(enabled=use_amp):
+                            result = model(reference_frames, current_frames, training=False, stage=stage)
+                        
                         # Collect statistics
                         total_loss += result["loss"].item() * batch_size
                         total_mse += result["mse_loss"].item() * batch_size
@@ -421,13 +450,13 @@ def evaluate_fully_batched(model, i_frame_model, test_loader, device, stage, fin
 
 
 def main():
-    parser = argparse.ArgumentParser(description='DCVC Training with Distributed Data Parallel')
+    parser = argparse.ArgumentParser(description='DCVC Training with Distributed Data Parallel and AMP')
     parser.add_argument('--vimeo_dir', type=str, required=True, help='Path to Vimeo-90k dataset')
     parser.add_argument('--septuplet_list', type=str, required=True, help='Path to septuplet list file')
     parser.add_argument('--i_frame_model_name', type=str, default='cheng2020-anchor', help='I-frame model name')
     parser.add_argument('--i_frame_model_path', type=str, required=True, help='Path to I-frame model checkpoint')
-    parser.add_argument('--checkpoint_dir', type=str, default='results/checkpoints_data_ddp', help='Directory to save checkpoints')
-    parser.add_argument('--log_dir', type=str, default='results/logs_data_ddp', help='Directory to save logs')
+    parser.add_argument('--checkpoint_dir', type=str, default='results/checkpoints_data_ddp_amp', help='Directory to save checkpoints')
+    parser.add_argument('--log_dir', type=str, default='results/logs_data_ddp_amp', help='Directory to save logs')
     parser.add_argument('--batch_size', type=int, default=4, help='Batch size per GPU')
     parser.add_argument('--crop_size', type=int, default=256, help='Random crop size')
     parser.add_argument('--lambda_value', type=float, required=True, help='Lambda value for rate-distortion trade-off')
@@ -440,7 +469,7 @@ def main():
     parser.add_argument('--num_workers', type=int, default=4, help='Number of workers for data loading per GPU')
     parser.add_argument('--model_type', type=str, default='psnr', choices=['psnr', 'ms-ssim'],
                         help='Model type: psnr or ms-ssim')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    parser.add_argument('--seed', type=int, default=3407, help='Random seed')
     parser.add_argument('--previous_stage_checkpoint', type=str, default=None,
                         help='Path to checkpoint from previous stage to resume from')
     parser.add_argument('--uvg_dir', type=str, required=True, help='Path to UVG dataset')
@@ -494,6 +523,24 @@ def main():
                         help='Number of distributed processes')
     parser.add_argument('--multiprocessing_distributed', action='store_true',
                         help='Use multi-processing distributed training')
+    
+    # Add AMP arguments
+    parser.add_argument('--amp', action='store_true', help='Use Automatic Mixed Precision for training')
+    parser.add_argument('--amp_dtype', type=str, default='float16', choices=['float16', 'bfloat16'],
+                       help='''Data type for AMP: 
+                             - float16: Better speed, less precision (10-bit mantissa), limited dynamic range
+                             - bfloat16: Better numerical stability (8-bit exponent like FP32), less precision (7-bit mantissa)
+                             bfloat16 is recommended for more complex models but requires hardware support (e.g., A100, H100 GPUs)''')
+                       
+    # Note: The following is added for backward compatibility with earlier AMP implementations
+    # but PyTorch's native AMP doesn't use these levels explicitly
+    parser.add_argument('--opt_level', type=str, default='O1', 
+                       help='''Legacy optimization level concept from NVIDIA Apex:
+                             - O0: FP32 training (no mixed precision)
+                             - O1: Mixed precision (FP16 where beneficial, FP32 elsewhere) - PyTorch native AMP behavior
+                             - O2: "Almost FP16" - uses FP16 wherever possible with FP32 master weights
+                             - O3: Pure FP16 (can be numerically unstable)
+                             With native PyTorch AMP, we're effectively always using O1 behavior''')
 
     args = parser.parse_args()
 
@@ -713,6 +760,15 @@ def main():
     else:
         optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
 
+    # Initialize AMP gradient scaler
+    scaler = GradScaler() if args.amp else None
+    
+    # If resuming training with a complete checkpoint, also load scaler state
+    if args.resume and isinstance(checkpoint, dict) and 'scaler_state_dict' in checkpoint and scaler is not None:
+        scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        if args.rank == 0:
+            print("Resumed scaler state for AMP")
+
     # Initialize learning rate scheduler
     if args.lr_scheduler == 'step':
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=args.lr_step_size, gamma=args.lr_gamma)
@@ -756,6 +812,12 @@ def main():
         if args.rank == 0:
             print("Resumed optimizer state")
 
+    # resume scaler state if resuming training
+    if args.resume and isinstance(checkpoint, dict) and 'scaler_state_dict' in checkpoint and scaler is not None:
+        scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        if args.rank == 0:
+            print("Resumed scaler state")
+
     # Log file (only on rank 0)
     if args.rank == 0:
         stage_descriptions = {
@@ -766,7 +828,7 @@ def main():
         }
 
         log_file = os.path.join(args.log_dir,
-                                f'train_log_lambda_{args.lambda_value}_quality_{args.quality_index}_stage_{args.stage}_{args.model_type}.txt')
+                                f'train_log_lambda_{args.lambda_value}_quality_{args.quality_index}_stage_{args.stage}_{args.model_type}_amp.txt')
         with open(log_file, 'a') as f:
             f.write(f"Training started at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"Distributed training with {args.world_size} GPUs\n")
@@ -782,6 +844,10 @@ def main():
             f.write(f"Gradient accumulation steps: {args.gradient_accumulation_steps}\n")
             f.write(f"Effective batch size per GPU: {args.batch_size * args.gradient_accumulation_steps}\n")
             f.write(f"Total effective batch size: {args.batch_size * args.world_size * args.gradient_accumulation_steps}\n")
+            f.write(f"AMP enabled: {args.amp}\n")
+            if args.amp:
+                f.write(f"  AMP opt level: {args.opt_level}\n")
+                f.write(f"  AMP dtype: {args.amp_dtype}\n")
             if args.sync_bn:
                 f.write("Using Synchronized BatchNorm\n")
             if args.lr_scheduler != 'none':
@@ -825,18 +891,20 @@ def main():
         if warmup_scheduler is not None and epoch < args.lr_warmup_epochs:
             warmup_scheduler.step()
         
-        # Train one epoch with fully batched GOP processing
+        # Train one epoch with fully batched GOP processing and AMP
         train_stats = train_one_epoch_fully_batched(
             model, i_frame_model, train_loader, optimizer, device,
             args.stage, epoch + 1,
             args.gradient_accumulation_steps, args.finetune,
-            distributed=(args.local_rank != -1), world_size=args.world_size
+            distributed=(args.local_rank != -1), world_size=args.world_size,
+            scaler=scaler, use_amp=args.amp  # Pass scaler and AMP flag
         )
 
-        # Evaluate on test set with fully batched GOP processing
+        # Evaluate on test set with fully batched GOP processing (using FP32 for accuracy)
         test_stats = evaluate_fully_batched(
             model, i_frame_model, test_loader, device, args.stage, args.finetune,
-            distributed=(args.local_rank != -1)
+            distributed=(args.local_rank != -1),
+            use_amp=False  # Use full precision for evaluation for more accurate metrics
         )
 
         # Step scheduler after training (different for ReduceLROnPlateau)
@@ -870,7 +938,7 @@ def main():
             # Save latest checkpoint with training state for resuming (only on rank 0)
             latest_checkpoint_path = os.path.join(
                 args.checkpoint_dir,
-                f'model_dcvc_lambda_{args.lambda_value}_quality_{args.quality_index}_stage_{args.stage}_latest.pth'
+                f'model_dcvc_lambda_{args.lambda_value}_quality_{args.quality_index}_stage_{args.stage}_latest_amp.pth'
             )
             
             # Get model state dict accounting for DDP wrapper
@@ -895,6 +963,10 @@ def main():
             if scheduler is not None:
                 save_dict['scheduler_state_dict'] = scheduler.state_dict()
             
+            # Add scaler state if using AMP
+            if scaler is not None:
+                save_dict['scaler_state_dict'] = scaler.state_dict()
+            
             # Save the checkpoint
             torch.save(save_dict, latest_checkpoint_path)
 
@@ -903,7 +975,7 @@ def main():
                 best_loss = test_stats['loss']
                 best_checkpoint_path = os.path.join(
                     args.checkpoint_dir,
-                    f'model_dcvc_lambda_{args.lambda_value}_quality_{args.quality_index}_stage_{args.stage}_best.pth'
+                    f'model_dcvc_lambda_{args.lambda_value}_quality_{args.quality_index}_stage_{args.stage}_best_amp.pth'
                 )
                 # Save full training state for the best model too
                 torch.save(save_dict, best_checkpoint_path)
@@ -915,7 +987,7 @@ def main():
     if args.rank == 0:
         final_model_path = os.path.join(
             args.checkpoint_dir,
-            f'model_dcvc_lambda_{args.lambda_value}_quality_{args.quality_index}_stage_{args.stage}.pth'
+            f'model_dcvc_lambda_{args.lambda_value}_quality_{args.quality_index}_stage_{args.stage}_amp.pth'
         )
         
         # Get model state dict accounting for DDP wrapper
@@ -931,7 +1003,7 @@ def main():
         if args.stage == 4:
             standard_model_path = os.path.join(
                 args.checkpoint_dir,
-                f'model_dcvc_quality_{args.quality_index}_{args.model_type}.pth'
+                f'model_dcvc_quality_{args.quality_index}_{args.model_type}_amp.pth'
             )
             torch.save(model_state_dict, standard_model_path)
             print(f"Final model (standard name) saved to {standard_model_path}")
