@@ -401,6 +401,99 @@ def evaluate_fully_batched(model, i_frame_model, test_loader, device, stage,fine
         "bpp": avg_bpp
     }
 
+def evaluate_fully_batched_three(model, i_frame_model, test_loader, device, stage,finetune=False):
+    """
+    Evaluate model using fully batched processing for GOP sequences
+    
+    Args:
+        gop_size: Group of Pictures size (12 for UVG)
+    """
+    model.eval()
+    total_loss = 0
+    total_mse = 0
+    total_bpp = 0
+    total_psnr = 0
+    n_frames = 0
+    
+    with torch.no_grad():
+        for batch_frames in test_loader:
+            batch_size = batch_frames.size(0)
+            seq_length = batch_frames.size(1)  # Number of frames in sequence
+            
+            # Initialize reference frames
+            reference_frames = None
+            
+            if finetune and stage == 4: 
+                print("Real coding order")
+                # Process each frame position in the sequence
+                for frame_pos in range(seq_length):
+                    # Get all frames at this position from all sequences in the batch
+                    current_frames = batch_frames[:, frame_pos, :, :, :].to(device)  # Shape: [B, C, H, W]
+                    
+                    if frame_pos == 0:  # I-frames
+                        # Process all I-frames in the batch together
+                        i_frame_results = i_frame_model(current_frames)
+                        reference_frames = i_frame_results["x_hat"]  # Shape: [B, C, H, W]
+                    else:  # P-frames
+                        # Process all P-frames in the batch with their corresponding reference frames
+                        result = model(reference_frames, current_frames, training=False, stage=stage)
+                        
+                        # Update reference frames for next position
+                        reference_frames = result["recon_image"]  # Shape: [B, C, H, W]
+                        
+                        # Collect statistics
+                        total_loss += result["loss"].item() * batch_size
+                        total_mse += result["mse_loss"].item() * batch_size
+                        total_bpp += result["bpp_train"].item() * batch_size
+                        total_psnr += -10 * math.log10(result["mse_loss"].item()) * batch_size
+                        
+                        n_frames += batch_size
+            else:
+                print("Three frame evaluation")
+                # Process each frame position in the sequence
+                for frame_pos in range(seq_length):
+                    if frame_pos == 0:
+                        continue
+                    else:
+                        if frame_pos ==seq_length-1:
+                            continue
+
+                        previous_frames = batch_frames[:, frame_pos - 1, :, :, :].to(device)
+                        current_frames = batch_frames[:, frame_pos, :, :, :].to(device)
+                        next_frames = batch_frames[:, frame_pos + 1, :, :, :].to(device)
+                        #process previous frames by I-frame model
+                        i_frame_results = i_frame_model(previous_frames)
+                        reference_frames = i_frame_results["x_hat"]  # Shape: [B, C, H, W]
+                        # Process all P-frames in the batch with their corresponding reference frames
+                        IP_result = model(reference_frames, current_frames, training=False, stage=stage)
+                        IP_loss = IP_result["loss"]
+                        PP_result = model(IP_result["pixel_rec"] if stage==1 else IP_result["recon_image"], next_frames, training=False, stage=stage)
+                        PP_loss = PP_result["loss"]
+                        # Collect statistics
+                        total_loss += (IP_loss + PP_loss).item() / 2 * batch_size
+                        total_mse += (IP_result["mse_loss"].item() + PP_result["mse_loss"].item()) / 2 * batch_size
+                        total_bpp += (IP_result["bpp_train"].item() + PP_result["bpp_train"].item()) / 2 * batch_size
+                        total_psnr += (-10 * math.log10((IP_result["mse_loss"].item() + PP_result["mse_loss"].item()) / 2)) * batch_size
+                        n_frames += batch_size
+    
+    # Calculate average statistics
+    if n_frames > 0:
+        avg_loss = total_loss / n_frames
+        avg_mse = total_mse / n_frames
+        avg_psnr = -10 * math.log10(avg_mse) if avg_mse > 0 else 100
+        avg_bpp = total_bpp / n_frames
+    else:
+        avg_loss = 0
+        avg_mse = 0
+        avg_psnr = 0
+        avg_bpp = 0
+    
+    return {
+        "loss": avg_loss,
+        "mse": avg_mse,
+        "psnr": avg_psnr,
+        "bpp": avg_bpp
+    }
 
 def main():
     parser = argparse.ArgumentParser(description='DCVC Training with Full Batch Processing')
@@ -709,10 +802,15 @@ def main():
             model, i_frame_model, test_loader, device, args.stage,args.finetune
         )
 
+        # Evaluate on test set with fully batched GOP processing
+        test_stats_three = evaluate_fully_batched_three(
+            model, i_frame_model, test_loader, device, args.stage,args.finetune
+        )
+
         # Step scheduler after training (different for ReduceLROnPlateau)
         if scheduler is not None:
             if args.lr_scheduler == 'plateau':
-                scheduler.step(test_stats['loss'])
+                scheduler.step(test_stats_three['loss'])
             elif epoch >= args.lr_warmup_epochs:  # Only step main scheduler after warmup
                 scheduler.step()
 
@@ -735,6 +833,11 @@ def main():
             f.write(f"  Test MSE: {test_stats['mse']:.6f}\n")
             f.write(f"  Test PSNR: {test_stats['psnr']:.4f}\n")
             f.write(f"  Test BPP: {test_stats['bpp']:.6f}\n")
+            f.write(f"  Test Loss Three: {test_stats_three['loss']:.6f}\n")
+            f.write(f"  Test MSE Three: {test_stats_three['mse']:.6f}\n")
+            f.write(f"  Test PSNR Three: {test_stats_three['psnr']:.4f}\n")
+            f.write(f"  Test BPP Three: {test_stats_three['bpp']:.6f}\n")
+            f.write("=" * 80 + "\n")
 
         # Save latest checkpoint with training state for resuming
         latest_checkpoint_path = os.path.join(
@@ -762,8 +865,8 @@ def main():
         torch.save(save_dict, latest_checkpoint_path)
 
         # Save best checkpoint if current test loss is the best so far
-        if test_stats['loss'] < best_loss:
-            best_loss = test_stats['loss']
+        if test_stats_three['loss'] < best_loss:
+            best_loss = test_stats_three['loss']
             best_checkpoint_path = os.path.join(
                 args.checkpoint_dir,
                 f'model_dcvc_lambda_{args.lambda_value}_quality_{args.quality_index}_stage_{args.stage}_best.pth'
