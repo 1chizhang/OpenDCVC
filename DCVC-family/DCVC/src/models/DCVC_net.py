@@ -648,7 +648,7 @@ class DCVC_net(nn.Module):
             #in stage 2, we train other modules except mv generation module. at this time, we freeze the mv generation module and calculate L_rec = lambda*distortion(rec,inp)
             mse_loss = self.mse(recon_image, input_image)
             L_rec = self.lmbda *mse_loss
-            bpp_train = 0
+            bpp_train = torch.tensor(0)
             loss = L_rec
         elif stage ==3:
             #in stage 3, the mv generation module is still frozen, and we calculate L_con = lambda*distortion(rec,inp) + bpp_y + bpp_z

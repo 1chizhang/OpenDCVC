@@ -122,14 +122,51 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 --master_port=19500 tra
   --lambda_value 256 \
   --quality_index 0 \
   --stage 1 \
-  --epochs 20 \
+  --epochs 40 \
   --model_type psnr \
   --batch_size 4 \
   --learning_rate 4e-4 \
   --lr_scheduler plateau \
   --lr_patience 3 \
   --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_0_psnr.pth \
-  --find_unused_parameters
+  --find_unused_parameters \
+  --resume /data/zhan5096/Project/OpenDCVC/DCVC-family/DCVC/results/checkpoints_data_ddp_3f/model_dcvc_lambda_256.0_quality_0_stage_1_latest.pth
+```
+
+```bash
+python train_dcvc_sq_2to7_data.py \
+  --vimeo_dir /data/zhan5096/Project/dataset/Vimeo90k/vimeo_septuplet/sequences \
+  --septuplet_list /data/zhan5096/Project/dataset/Vimeo90k/vimeo_septuplet/sep_trainlist.txt \
+  --uvg_dir /data/zhan5096/Project/dataset/UVG/png_sequences \
+  --i_frame_model_path checkpoints/cheng2020-anchor-3-e49be189.pth.tar \
+  --lambda_value 256 \
+  --quality_index 0 \
+  --stage 2 \
+  --epochs 20 \
+  --model_type psnr \
+  --batch_size 4 \
+  --lr_scheduler plateau \
+  --lr_patience 3 \
+  --cuda_device 3 \
+  --previous_stage_checkpoint /data/zhan5096/Project/OpenDCVC/DCVC-family/DCVC/results/checkpoints_data/model_dcvc_lambda_256.0_quality_0_stage_1_latest.pth
+```
+
+```bash
+python train_dcvc_sq_2to7_data.py \
+  --vimeo_dir /data/zhan5096/Project/dataset/Vimeo90k/vimeo_septuplet/sequences \
+  --septuplet_list /data/zhan5096/Project/dataset/Vimeo90k/vimeo_septuplet/sep_trainlist.txt \
+  --uvg_dir /data/zhan5096/Project/dataset/UVG/png_sequences \
+  --i_frame_model_path checkpoints/cheng2020-anchor-4-98b0b468.pth.tar \
+  --lambda_value 512 \
+  --quality_index 1 \
+  --stage 1 \
+  --epochs 20 \
+  --model_type psnr \
+  --batch_size 4 \
+  --lr_scheduler plateau \
+  --lr_patience 3 \
+  --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_0_psnr.pth \
+  --cuda_device 2
 ```
 
 
