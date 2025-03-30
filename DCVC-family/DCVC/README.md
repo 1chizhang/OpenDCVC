@@ -105,15 +105,14 @@ python train_dcvc_sq_2to7_data.py \
   --i_frame_model_path checkpoints/cheng2020-anchor-3-e49be189.pth.tar \
   --lambda_value 256 \
   --quality_index 0 \
-  --stage 1 \
+  --stage 2 \
   --epochs 20 \
   --model_type psnr \
   --batch_size 4 \
   --lr_scheduler plateau \
   --lr_patience 3 \
-  --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_0_psnr.pth \
   --cuda_device 1 \
-  --resume /home/yichi/Project/OpenDCVC/DCVC-family/DCVC/results/checkpoints_data/model_dcvc_lambda_256.0_quality_0_stage_1_latest.pth
+  --previous_stage_checkpoint /home/yichi/Project/OpenDCVC/DCVC-family/DCVC/results/checkpoints_data/model_dcvc_lambda_256.0_quality_0_stage_1_latest.pth
 ```
 
 ```bash
@@ -131,7 +130,8 @@ python train_dcvc_sq_3to7_data.py \
   --lr_scheduler plateau \
   --lr_patience 3 \
   --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_0_psnr.pth \
-  --cuda_device 0
+  --cuda_device 0 \
+  --resume /home/yichi/Project/OpenDCVC/DCVC-family/DCVC/results/checkpoints_data_3f/model_dcvc_lambda_256.0_quality_0_stage_1_latest.pth
 ```
 # R-D Curve of DCVC
 ![PSNR RD Curve](assets/rd_curve_psnr.png)

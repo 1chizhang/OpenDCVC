@@ -371,7 +371,7 @@ def evaluate_fully_batched(model, i_frame_model, test_loader, device, stage,fine
                         
                         n_frames += batch_size
             else:
-                print("Two frame evaluation")
+                # print("Two frame evaluation")
                 # Process each frame position in the sequence
                 for frame_pos in range(seq_length):
                     if frame_pos == 0:
@@ -459,7 +459,7 @@ def evaluate_fully_batched_three(model, i_frame_model, test_loader, device, stag
                         
                         n_frames += batch_size
             else:
-                print("Three frame evaluation")
+                # print("Three frame evaluation")
                 # Process each frame position in the sequence
                 for frame_pos in range(seq_length):
                     if frame_pos == 0:

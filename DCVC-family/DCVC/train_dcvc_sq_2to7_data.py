@@ -361,7 +361,6 @@ def evaluate_fully_batched(model, i_frame_model, test_loader, device, stage,fine
                         
                         n_frames += batch_size
             else:
-                print("Two frame evaluation")
                 # Process each frame position in the sequence
                 for frame_pos in range(seq_length):
                     if frame_pos == 0:
@@ -449,7 +448,6 @@ def evaluate_fully_batched_three(model, i_frame_model, test_loader, device, stag
                         
                         n_frames += batch_size
             else:
-                print("Three frame evaluation")
                 # Process each frame position in the sequence
                 for frame_pos in range(seq_length):
                     if frame_pos == 0:
@@ -675,6 +673,17 @@ def main():
     start_epoch = 0
     best_loss = float('inf')
 
+    # Log file
+    stage_descriptions = {
+        1: "Warm up MV generation part",
+        2: "Train other modules",
+        3: "Train with bit cost",
+        4: "End-to-end training"
+    }
+
+    log_file = os.path.join(args.log_dir,
+                            f'train_log_lambda_{args.lambda_value}_quality_{args.quality_index}_stage_{args.stage}_{args.model_type}.txt')
+
     # Check for SpyNet initialization
     if args.spynet_checkpoint:
         print(f"Initializing motion estimation network with pretrained SpyNet weights: {args.spynet_checkpoint}")
@@ -728,22 +737,38 @@ def main():
         print(f"Loading model from previous stage checkpoint: {args.previous_stage_checkpoint}")
         try:
             checkpoint = torch.load(args.previous_stage_checkpoint, map_location=device)
-            unwrap_model(model).load_dict(checkpoint)  # Use load_dict method as defined in DCVC_net
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                # Full checkpoint with training state
+                unwrap_model(model).load_dict(checkpoint['model_state_dict'])
+                print("Loaded model weights only (no training state)")
+            else:
+                unwrap_model(model).load_dict(checkpoint)  # Use load_dict method as defined in DCVC_net
             print("Successfully loaded model from previous stage")
+            #test result instantly for the previous stage
+            test_stats = evaluate_fully_batched(
+                model, i_frame_model, test_loader, device, args.stage-1,args.finetune
+            )
+            # Evaluate on test set with fully batched GOP processing
+            test_stats_three = evaluate_fully_batched_three(
+                model, i_frame_model, test_loader, device, args.stage-1,args.finetune
+            )
+            # Log results
+            with open(log_file, 'a') as f:
+                f.write(f"From stage {args.stage-1}:\n")
+                f.write(f"  Test Loss: {test_stats['loss']:.6f}\n")
+                f.write(f"  Test MSE: {test_stats['mse']:.6f}\n")
+                f.write(f"  Test PSNR: {test_stats['psnr']:.4f}\n")
+                f.write(f"  Test BPP: {test_stats['bpp']:.6f}\n")
+                f.write(f"  Test Loss three: {test_stats_three['loss']:.6f}\n")
+                f.write(f"  Test MSE three: {test_stats_three['mse']:.6f}\n")
+                f.write(f"  Test PSNR three: {test_stats_three['psnr']:.4f}\n")
+                f.write(f"  Test BPP three: {test_stats_three['bpp']:.6f}\n")
+
         except Exception as e:
             print(f"Error loading previous stage checkpoint: {e}")
             print("Starting training from scratch")
 
-    # Log file
-    stage_descriptions = {
-        1: "Warm up MV generation part",
-        2: "Train other modules",
-        3: "Train with bit cost",
-        4: "End-to-end training"
-    }
 
-    log_file = os.path.join(args.log_dir,
-                            f'train_log_lambda_{args.lambda_value}_quality_{args.quality_index}_stage_{args.stage}_{args.model_type}.txt')
     with open(log_file, 'a') as f:
         f.write(f"Training started at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"Lambda value: {args.lambda_value}\n")
@@ -874,6 +899,9 @@ def main():
             # Save full training state for the best model too
             torch.save(save_dict, best_checkpoint_path)
             print(f"New best model saved with test loss: {best_loss:.6f}")
+            #write to log
+            with open(log_file, 'a') as f:
+                f.write(f"New best model saved with test loss: {best_loss:.6f}\n")
 
         print(f"Epoch {epoch + 1}/{args.epochs} completed. Latest checkpoint saved.")
 
