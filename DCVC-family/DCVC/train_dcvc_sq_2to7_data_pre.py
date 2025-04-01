@@ -25,8 +25,7 @@ torch.backends.cudnn.benchmark = False
 
 # Define a dataset class for Vimeo-90k that returns GOP sequences
 class Vimeo90kGOPDataset(torch.utils.data.Dataset):
-    def __init__(self, root_dir, septuplet_list, transform=None, crop_size=256, gop_size=7, 
-                 shuffle_frames=True, random_flip_type='sequence', flip_prob=0.5):
+    def __init__(self, root_dir,precomputed_dir, septuplet_list, transform=None, crop_size=256, gop_size=7, shuffle_frames=True):
         """
         Args:
             root_dir (string): Directory with all the images.
@@ -34,42 +33,43 @@ class Vimeo90kGOPDataset(torch.utils.data.Dataset):
             transform (callable, optional): Optional transform to be applied on a sample.
             crop_size (int): Size of the random crop.
             gop_size (int): GOP size for training.
-            shuffle_frames (bool): Whether to randomly shuffle frame order.
-            random_flip_type (string): Type of random flip - 'none', 'sequence' or 'individual'.
-                                      'sequence': the entire sequence is flipped with probability flip_prob
-                                      'individual': each frame is independently flipped with probability flip_prob
-            flip_prob (float): Probability of applying a flip (0.0 to 1.0).
         """
         self.root_dir = root_dir
+        self.precomputed_dir = precomputed_dir
         self.transform = transform
         self.crop_size = crop_size
         self.gop_size = gop_size
         self.shuffle_frames = shuffle_frames
-        self.random_flip_type = random_flip_type
-        self.flip_prob = flip_prob
         self.septuplet_list = []
-        
+
         with open(septuplet_list, 'r') as f:
             for line in f:
                 if line.strip():  # Skip empty lines
                     self.septuplet_list.append(line.strip())
-    
+
     def __len__(self):
         return len(self.septuplet_list)
-    
+
     def __getitem__(self, idx):
         if torch.is_tensor(idx):
             idx = idx.tolist()
-        
+
         septuplet_name = self.septuplet_list[idx]
         frames = []
-        
+        precomputed_frames = []
+
         # Load frames
-        for i in range(1, 8):  # Vimeo-90k septuplet has 7 frames
+        for i in range(2, 8):  # Vimeo-90k septuplet has 7 frames Frames 2-7 (to be compressed as P-frames)
             img_name = os.path.join(self.root_dir, septuplet_name, f'im{i}.png')
             image = Image.open(img_name).convert('RGB')
             frames.append(image)
-        
+
+        # Load precomputed frames
+        for i in range(1, 7):  # Vimeo-90k septuplet has 7 frames Reference frames 1-6
+            precomputed_name = os.path.join(self.precomputed_dir, septuplet_name, f'ref{i}.png')
+            precomputed_image = Image.open(precomputed_name).convert('RGB')
+            precomputed_frames.append(precomputed_image)
+
         # Apply random crop to the same location for all frames
         if self.crop_size:
             width, height = frames[0].size
@@ -77,20 +77,14 @@ class Vimeo90kGOPDataset(torch.utils.data.Dataset):
                 x = random.randint(0, width - self.crop_size)
                 y = random.randint(0, height - self.crop_size)
                 frames = [img.crop((x, y, x + self.crop_size, y + self.crop_size)) for img in frames]
-        
-        # Apply random flip
-        if self.random_flip_type == 'sequence':
-            # Flip the entire sequence with probability flip_prob
-            if random.random() < self.flip_prob:
-                frames = [img.transpose(Image.FLIP_LEFT_RIGHT) for img in frames]
-        elif self.random_flip_type == 'individual':
-            # Flip each frame independently with probability flip_prob
-            frames = [img.transpose(Image.FLIP_LEFT_RIGHT) if random.random() < self.flip_prob else img for img in frames]
-        
+                precomputed_frames = [img.crop((x, y, x + self.crop_size, y + self.crop_size)) for img in precomputed_frames]
+
         # Apply transform if provided
         if self.transform:
             frames = [self.transform(img) for img in frames]
-        
+            precomputed_frames = [self.transform(img) for img in precomputed_frames]
+
+
         # Random shuffle frame order if enabled
         if self.shuffle_frames:
             # Create a list of indices and shuffle it
@@ -99,12 +93,12 @@ class Vimeo90kGOPDataset(torch.utils.data.Dataset):
             
             # Reorder frames according to shuffled indices
             frames = [frames[i] for i in frame_indices]
+            precomputed_frames = [precomputed_frames[i] for i in frame_indices]
             
             # Option: You could also return the shuffle indices if needed for reconstruction
             # return torch.stack(frames), frame_indices
-        
-        return torch.stack(frames)  # Return frames as a single tensor [S, C, H, W]
 
+        return torch.stack(frames), torch.stack(precomputed_frames)  # Return frames as a single tensor [S, C, H, W]
 
 # Define a dataset class for UVG that returns GOP sequences
 class UVGGOPDataset(torch.utils.data.Dataset):
@@ -205,17 +199,15 @@ def train_one_epoch_fully_batched(model, i_frame_model, train_loader, optimizer,
     # Process batches of GOP sequences
     progress_bar = tqdm(train_loader)
     
-    for batch_idx, batch_frames in enumerate(progress_bar):
+    for batch_idx, (batch_frames, batch_precomputed_frames) in enumerate(progress_bar):
         batch_size = batch_frames.size(0)
         seq_length = batch_frames.size(1)  # Number of frames in sequence (S dimension)
         batch_loss = 0
-        
         
         # Process each frame position sequentially within the batch
         # For each position, we process all sequences in parallel
         
         # Initialize reference frames for the batch
-        reference_frames = None
         
         if finetune and stage == 4:
             # print("Finetuning the model")
@@ -260,39 +252,29 @@ def train_one_epoch_fully_batched(model, i_frame_model, train_loader, optimizer,
             # print("Two frame training")
             # Process each frame position in the sequence
             for frame_pos in range(seq_length):
+                reference_frames = batch_precomputed_frames[:, frame_pos, :, :, :].to(device)  # Shape: [B, C, H, W]
+                current_frames = batch_frames[:, frame_pos, :, :, :].to(device)  # Shape: [B, C, H, W]
+                # Zero gradients for each frame position
+                optimizer.zero_grad()
 
-                if frame_pos == 0:  # First frame (I-frame) in each sequence
-                    # skip I-frame processing
-                    continue
+                # Process all P-frames in the batch with their corresponding reference frames
+                # DCVC model expects reference and current frames in the same batch size
+                result = model(reference_frames, current_frames, training=True, stage=stage)
 
-                else:  # P-frames
-                    previous_frames = batch_frames[:, frame_pos - 1, :, :, :].to(device)  # Shape: [B, C, H, W]
-                    current_frames = batch_frames[:, frame_pos, :, :, :].to(device)  # Shape: [B, C, H, W]
-                    #process previous frames by I-frame model
-                    with torch.no_grad():  # Don't train I-frame model
-                        i_frame_results = i_frame_model(previous_frames)
-                        reference_frames = i_frame_results["x_hat"]  # Shape: [B, C, H, W]
-                    # Zero gradients for each frame position
-                    optimizer.zero_grad()
+                # Calculate loss (already accounts for batch size, just normalize by accumulation steps)
+                loss = result["loss"]
+                loss.backward()
 
-                    # Process all P-frames in the batch with their corresponding reference frames
-                    # DCVC model expects reference and current frames in the same batch size
-                    result = model(reference_frames, current_frames, training=True, stage=stage)
+                # Apply optimizer step for each frame position
+                optimizer.step()
 
-                    # Calculate loss (already accounts for batch size, just normalize by accumulation steps)
-                    loss = result["loss"]
-                    loss.backward()
+                # Collect statistics
+                batch_loss += result["loss"].item()
+                total_mse += result["mse_loss"].item() * batch_size  # Account for all frames in batch
+                total_bpp += result["bpp_train"].item() * batch_size
+                total_psnr += -10 * math.log10(result["mse_loss"].item()) * batch_size
 
-                    # Apply optimizer step for each frame position
-                    optimizer.step()
-
-                    # Collect statistics
-                    batch_loss += result["loss"].item()
-                    total_mse += result["mse_loss"].item() * batch_size  # Account for all frames in batch
-                    total_bpp += result["bpp_train"].item() * batch_size
-                    total_psnr += -10 * math.log10(result["mse_loss"].item()) * batch_size
-
-                    n_frames += batch_size  # Count all frames in batch
+                n_frames += batch_size  # Count all frames in batch
 
         
         # Update total loss
@@ -512,6 +494,7 @@ def evaluate_fully_batched_three(model, i_frame_model, test_loader, device, stag
 def main():
     parser = argparse.ArgumentParser(description='DCVC Training with Full Batch Processing')
     parser.add_argument('--vimeo_dir', type=str, required=True, help='Path to Vimeo-90k dataset')
+    parser.add_argument('--precomputed_dir', type=str, required=True, help='Path to precomputed directory')
     parser.add_argument('--septuplet_list', type=str, required=True, help='Path to septuplet list file')
     parser.add_argument('--i_frame_model_name', type=str, default='cheng2020-anchor', help='I-frame model name')
     parser.add_argument('--i_frame_model_path', type=str, required=True, help='Path to I-frame model checkpoint')
@@ -591,14 +574,15 @@ def main():
         transforms.ToTensor(),
     ])
 
+    
     # Create training dataset with GOP structure
     train_dataset = Vimeo90kGOPDataset(
         root_dir=args.vimeo_dir,
+        precomputed_dir=os.path.join(args.precomputed_dir, str(args.quality_index)),
         septuplet_list=args.septuplet_list,
         transform=transform,
         crop_size=args.crop_size,
-        gop_size=7,  # Vimeo90k has 7 frames per sequence
-        random_flip_type='sequence',  # Randomly flip the entire sequence
+        gop_size=7  # Vimeo90k has 7 frames per sequence
     )
 
     train_loader = DataLoader(
