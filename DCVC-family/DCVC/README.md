@@ -98,21 +98,40 @@ python train_dcvc_sq_2to7.py \
 ```
 
 ```bash
-python train_dcvc_sq_2to7_data.py \
+python train_dcvc_sq_2to7_data_pre_rs.py \
   --vimeo_dir /home/yichi/Project/dataset/Vimeo90k/vimeo_septuplet/sequences \
+  --precomputed_dir /home/yichi/Project/dataset/Vimeo90k/vimeo_septuplet/reference_sequences \
+  --septuplet_list /home/yichi/Project/dataset/Vimeo90k/vimeo_septuplet/sep_trainlist.txt \
+  --uvg_dir /home/yichi/Project/dataset/UVG/png_sequences \
+  --i_frame_model_path /home/yichi/Project/OpenDCVC/DCVC-family/DCVC/checkpoints/cheng2020-anchor-3-e49be189.pth.tar \
+  --lambda_value 256 \
+  --quality_index 0 \
+  --stage 3 \
+  --epochs 20 \
+  --model_type psnr \
+  --batch_size 4 \
+  --lr_scheduler plateau \
+  --lr_patience 3 \
+  --cuda_device 0 \
+  --previous_stage_checkpoint /home/yichi/Project/OpenDCVC/DCVC-family/DCVC/results/checkpoints_data/model_dcvc_lambda_256.0_quality_0_stage_2_best.pth
+```
+```bash
+python train_dcvc_sq_2to7_data_pre_rs.py \
+  --vimeo_dir /home/yichi/Project/dataset/Vimeo90k/vimeo_septuplet/sequences \
+  --precomputed_dir /home/yichi/Project/dataset/Vimeo90k/vimeo_septuplet/reference_sequences \
   --septuplet_list /home/yichi/Project/dataset/Vimeo90k/vimeo_septuplet/sep_trainlist.txt \
   --uvg_dir /home/yichi/Project/dataset/UVG/png_sequences \
   --i_frame_model_path checkpoints/cheng2020-anchor-3-e49be189.pth.tar \
   --lambda_value 256 \
   --quality_index 0 \
   --stage 2 \
-  --epochs 20 \
+  --epochs 40 \
   --model_type psnr \
   --batch_size 4 \
   --lr_scheduler plateau \
   --lr_patience 3 \
   --cuda_device 1 \
-  --previous_stage_checkpoint /home/yichi/Project/OpenDCVC/DCVC-family/DCVC/results/checkpoints_data/model_dcvc_lambda_256.0_quality_0_stage_1_latest.pth
+  --resume /home/yichi/Project/OpenDCVC/DCVC-family/DCVC/results/checkpoints_data/model_dcvc_lambda_256.0_quality_0_stage_2_latest.pth
 ```
 
 ```bash
