@@ -809,6 +809,9 @@ def main():
             f.write(f"Starting from epoch: {start_epoch}\n")
         if args.spynet_checkpoint:
             f.write(f"SpyNet initialization: {args.spynet_checkpoint}\n")
+        if args.spynet_from_dcvc_checkpoint:
+            f.write(f"SpyNet initialization from DCVC checkpoint: {args.spynet_from_dcvc_checkpoint}\n")
+        f.write(f"Training dataset: {len(train_dataset)} sequences\n")
         f.write(f"UVG dataset: {len(test_dataset)} sequences\n")
         f.write(f"Using fully batched GOP processing with parallel P-frame batch processing\n")
         f.write("=" * 80 + "\n")
