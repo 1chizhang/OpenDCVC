@@ -135,6 +135,26 @@ python train_dcvc_sq_2to7_data_pre_rs.py \
 ```
 
 ```bash
+python train_dcvc_sq_2to7_data_pre_rs_sl.py \
+  --vimeo_dir /home/yichi/Project/dataset/Vimeo90k/vimeo_septuplet/sequences \
+  --precomputed_dir /home/yichi/Project/dataset/Vimeo90k/vimeo_septuplet/reference_sequences \
+  --septuplet_list /home/yichi/Project/dataset/Vimeo90k/vimeo_septuplet/sep_trainlist.txt \
+  --uvg_dir /home/yichi/Project/dataset/UVG/png_sequences \
+  --precomputed_dir_uvg /home/yichi/Project/dataset/UVG/reference_sequences \
+  --lambda_value 256 \
+  --quality_index 0 \
+  --stage 2 \
+  --epochs 40 \
+  --model_type psnr \
+  --batch_size 4 \
+  --lr_scheduler plateau \
+  --lr_patience 3 \
+  --cuda_device 1 \
+  --resume /home/yichi/Project/OpenDCVC/DCVC-family/DCVC/results/checkpoints_data/model_dcvc_lambda_256.0_quality_0_stage_2_latest.pth
+```
+
+
+```bash
 python train_dcvc_sq_3to7_data.py \
   --vimeo_dir /home/yichi/Project/dataset/Vimeo90k/vimeo_septuplet/sequences \
   --septuplet_list /home/yichi/Project/dataset/Vimeo90k/vimeo_septuplet/sep_trainlist.txt \
