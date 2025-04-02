@@ -133,6 +133,9 @@ def precompute_reference_frames(dataset, i_frame_model, device, save_dir, qualit
                 # Save each compressed frame in the sequence
                 for f in range(num_frames):
                     frame_tensor = all_compressed[b, f]
+                    # 关键修复: 在保存前裁剪像素值到有效范围 [0, 1]
+                    frame_tensor = frame_tensor.clamp(0, 1)
+
                     # Save as compressed image
                     frame_path = os.path.join(frame_save_dir, f"ref{f+1}.png")
                     # Convert tensor to PIL image and as uncompressed PNG
