@@ -130,6 +130,9 @@ def precompute_uvg_reference_frames(dataset, i_frame_model, device, save_dir, qu
                 frame_path = os.path.join(video_save_dir, f"ref_{frame_name}")
                 frame_tensor = compressed_frames[i]
                 
+                # 关键修复: 在保存前裁剪像素值到有效范围 [0, 1]
+                frame_tensor = frame_tensor.clamp(0, 1)
+                
                 # Convert tensor to PIL image and save as uncompressed PNG
                 frame_image = transforms.ToPILImage()(frame_tensor)
                 frame_image.save(frame_path, format='PNG', compress_level=0)
@@ -216,4 +219,7 @@ def main():
 if __name__ == '__main__':
     main()
     # Example usage:
+    # python preprocess_test.py --uvg_dir /home/yichi/Project/dataset/UVG/png_sequences --save_dir /home/yichi/Project/dataset/UVG/reference_sequences --i_frame_model_path /home/yichi/Project/OpenDCVC/DCVC-family/DCVC/checkpoints/cheng2020-anchor-3-e49be189.pth.tar --quality_index 0 --cuda_device 0
+    # python preprocess_test.py --uvg_dir /home/yichi/Project/dataset/UVG/png_sequences --save_dir /home/yichi/Project/dataset/UVG/reference_sequences --i_frame_model_path /home/yichi/Project/OpenDCVC/DCVC-family/DCVC/checkpoints/cheng2020-anchor-4-98b0b468.pth.tar --quality_index 1 --cuda_device 1
+    # python preprocess_test.py --uvg_dir /home/yichi/Project/dataset/UVG/png_sequences --save_dir /home/yichi/Project/dataset/UVG/reference_sequences --i_frame_model_path /home/yichi/Project/OpenDCVC/DCVC-family/DCVC/checkpoints/cheng2020-anchor-5-23852949.pth.tar --quality_index 2 --cuda_device 0
     # python preprocess_test.py --uvg_dir /home/yichi/Project/dataset/UVG/png_sequences --save_dir /home/yichi/Project/dataset/UVG/reference_sequences --i_frame_model_path /home/yichi/Project/OpenDCVC/DCVC-family/DCVC/checkpoints/cheng2020-anchor-6-4c052b1a.pth.tar --quality_index 3 --cuda_device 1

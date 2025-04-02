@@ -150,7 +150,7 @@ python train_dcvc_sq_2to7_data_pre_rs_sl.py \
   --lr_scheduler plateau \
   --lr_patience 3 \
   --cuda_device 1 \
-  --resume /home/yichi/Project/OpenDCVC/DCVC-family/DCVC/results/checkpoints_data/model_dcvc_lambda_256.0_quality_0_stage_2_latest.pth
+  --previous_stage_checkpoint /home/yichi/Project/OpenDCVC/DCVC-family/DCVC/results/checkpoints_data/model_dcvc_lambda_256.0_quality_0_stage_1_latest.pth
 ```
 
 
@@ -193,3 +193,8 @@ If you find this work useful for your research, please cite:
 
 # Trademarks
 This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft trademarks or logos is subject to and must follow [Microsoft’s Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general). Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship. Any use of third-party trademarks or logos are subject to those third-party’s policies.
+
+
+#!/bin/bash
+curl -L -o ~/Downloads/hevc-b.zip\
+  https://www.kaggle.com/api/v1/datasets/download/minhngt02/hevc-b

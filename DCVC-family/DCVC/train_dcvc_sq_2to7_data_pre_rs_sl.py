@@ -269,7 +269,7 @@ def train_one_epoch(model, train_loader, optimizer, device, stage, epoch, gradie
 # Modified evaluation function without dual loops
 def evaluate(model, test_loader, device, stage):
     """
-    Evaluate model using simplified processing of frame pairs
+    Evaluate model using simplified processing of frame pairs with progress bar
     """
     model.eval()
     total_loss = 0
@@ -278,8 +278,11 @@ def evaluate(model, test_loader, device, stage):
     total_psnr = 0
     n_frames = 0
     
+    # Create a progress bar
+    progress_bar = tqdm(test_loader, desc="Evaluating")
+    
     with torch.no_grad():
-        for reference_frames, current_frames in test_loader:
+        for reference_frames, current_frames in progress_bar:
             batch_size = reference_frames.size(0)
             
             # Move data to device
@@ -295,6 +298,14 @@ def evaluate(model, test_loader, device, stage):
             total_psnr += -10 * math.log10(result["mse_loss"].item()) * batch_size
             
             n_frames += batch_size
+            
+            # Update progress bar with current metrics
+            if n_frames > 0:
+                progress_bar.set_postfix({
+                    'loss': total_loss / n_frames,
+                    'PSNR': -10 * math.log10(total_mse / n_frames) if total_mse > 0 else 100,
+                    'BPP': total_bpp / n_frames
+                })
     
     # Calculate average statistics
     if n_frames > 0:

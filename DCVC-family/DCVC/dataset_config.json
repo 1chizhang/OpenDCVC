@@ -1,0 +1,24 @@
+{
+    "HEVC_B": {
+        "base_path": "/home/yichi/Project/dataset/HEVC-B/png_sequences",
+        "sequences": {
+            "BQTerrace_1920x1024_60":       {"frames":  100, "gop":  10},
+            "BasketballDrive_1920x1024_50": {"frames":  100, "gop":  10},
+            "Cactus_1920x1024_50":          {"frames":  100, "gop":  10},
+            "Kimono_1920x1024_24":         {"frames":  100, "gop":  10},
+            "ParkScene_1920x1024_24":       {"frames":  100, "gop":  10}
+        }
+    },
+    "UVG": {
+        "base_path": "/home/yichi/Project/dataset/UVG/png_sequences",
+        "sequences": {
+            "Beauty_1920x1024_120fps_420_8bit_YUV":            {"frames":  120, "gop":  12},
+            "Bosphorus_1920x1024_120fps_420_8bit_YUV":         {"frames":  120, "gop":  12},
+            "HoneyBee_1920x1024_120fps_420_8bit_YUV":          {"frames":  120, "gop":  12},
+            "Jockey_1920x1024_120fps_420_8bit_YUV":            {"frames":  120, "gop":  12},
+            "ReadySteadyGo_1920x1024_120fps_420_8bit_YUV":     {"frames":  120, "gop":  12},
+            "ShakeNDry_1920x1024_120fps_420_8bit_YUV":         {"frames":  120, "gop":  12},
+            "YachtRide_1920x1024_120fps_420_8bit_YUV":         {"frames":  120, "gop":  12}
+        }
+    }
+}

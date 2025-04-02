@@ -10,7 +10,7 @@ import torch
 import json
 import numpy as np
 from PIL import Image
-from src.models.DCVC_net import DCVC_net
+from src.models.DCVC_net_ori import DCVC_net
 from src.zoo.image import model_architectures as architectures
 import time
 from tqdm import tqdm
