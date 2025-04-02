@@ -818,11 +818,16 @@ def main():
 
     # Training loop
     for epoch in range(start_epoch, args.epochs):
+        # Record epoch start time
+        epoch_start_time = time.time()
+        epoch_start_str = time.strftime('%Y-%m-%d %H:%M:%S')
+        
         # Log current learning rate
         current_lr = optimizer.param_groups[0]['lr']
         print(f"Epoch {epoch+1}/{args.epochs} - Learning rate: {current_lr:.6f}")
         with open(log_file, 'a') as f:
             f.write(f"Epoch {epoch+1}/{args.epochs} - Learning rate: {current_lr:.6f}\n")
+            f.write(f"Epoch start time: {epoch_start_str}\n")
 
         # Apply warmup scheduler if in warmup phase
         if warmup_scheduler is not None and epoch < args.lr_warmup_epochs:
@@ -852,6 +857,16 @@ def main():
             elif epoch >= args.lr_warmup_epochs:  # Only step main scheduler after warmup
                 scheduler.step()
 
+        # Record epoch end time and calculate duration
+        epoch_end_time = time.time()
+        epoch_end_str = time.strftime('%Y-%m-%d %H:%M:%S')
+        epoch_duration = epoch_end_time - epoch_start_time
+        
+        # Format duration as hours:minutes:seconds
+        hours, remainder = divmod(epoch_duration, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        duration_str = f"{int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}"
+
         # Log results
         with open(log_file, 'a') as f:
             f.write(f"Stage {args.stage}, Epoch {epoch + 1}/{args.epochs}:\n")
@@ -875,6 +890,8 @@ def main():
             f.write(f"  Test MSE Three: {test_stats_three['mse']:.6f}\n")
             f.write(f"  Test PSNR Three: {test_stats_three['psnr']:.4f}\n")
             f.write(f"  Test BPP Three: {test_stats_three['bpp']:.6f}\n")
+            f.write(f"  Epoch end time: {epoch_end_str}\n")
+            f.write(f"  Epoch duration: {duration_str} ({epoch_duration:.2f} seconds)\n")
             f.write("=" * 80 + "\n")
 
         # Save latest checkpoint with training state for resuming
