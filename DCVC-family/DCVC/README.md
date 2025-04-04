@@ -106,14 +106,14 @@ python train_dcvc_sq_2to7_data_pre_rs.py \
   --i_frame_model_path /home/yichi/Project/OpenDCVC/DCVC-family/DCVC/checkpoints/cheng2020-anchor-3-e49be189.pth.tar \
   --lambda_value 256 \
   --quality_index 0 \
-  --stage 3 \
+  --stage 4 \
   --epochs 20 \
   --model_type psnr \
   --batch_size 4 \
   --lr_scheduler plateau \
   --lr_patience 3 \
   --cuda_device 0 \
-  --previous_stage_checkpoint /home/yichi/Project/OpenDCVC/DCVC-family/DCVC/results/checkpoints_data/model_dcvc_lambda_256.0_quality_0_stage_2_best.pth
+  --previous_stage_checkpoint /home/yichi/Project/OpenDCVC/DCVC-family/DCVC/results/checkpoints_data_pre_rs/model_dcvc_lambda_256.0_quality_0_stage_3_latest_previous.pth
 ```
 ```bash
 python train_dcvc_sq_2to7_data_pre_rs.py \
@@ -124,14 +124,14 @@ python train_dcvc_sq_2to7_data_pre_rs.py \
   --i_frame_model_path checkpoints/cheng2020-anchor-3-e49be189.pth.tar \
   --lambda_value 256 \
   --quality_index 0 \
-  --stage 2 \
-  --epochs 40 \
+  --stage 3 \
+  --epochs 20 \
   --model_type psnr \
   --batch_size 4 \
   --lr_scheduler plateau \
   --lr_patience 3 \
   --cuda_device 1 \
-  --resume /home/yichi/Project/OpenDCVC/DCVC-family/DCVC/results/checkpoints_data/model_dcvc_lambda_256.0_quality_0_stage_2_latest.pth
+  --previous_stage_checkpoint /home/yichi/Project/OpenDCVC/DCVC-family/DCVC/results/checkpoints_data_pre_rs/model_dcvc_lambda_256.0_quality_0_stage_2_best.pth
 ```
 
 ```bash

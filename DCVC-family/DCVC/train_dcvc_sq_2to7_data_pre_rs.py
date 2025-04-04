@@ -662,7 +662,7 @@ def main():
         model = torch.compile(model)
 
     # Initialize optimizer
-    if args.stage == 4 and args.previous_stage_checkpoint:
+    if args.stage == 4 and args.finetune:
         # Use lower learning rate for stage 4
         optimizer = optim.Adam(model.parameters(), lr=1e-5)
     else:
