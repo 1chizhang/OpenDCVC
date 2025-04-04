@@ -148,7 +148,7 @@ python train_dcvc_sq_2to7_data.py \
   --lr_scheduler plateau \
   --lr_patience 3 \
   --cuda_device 3 \
-  --previous_stage_checkpoint /data/zhan5096/Project/OpenDCVC/DCVC-family/DCVC/results/checkpoints_data/model_dcvc_lambda_256.0_quality_0_stage_1_latest.pth
+  --spynet_from_dcvc_checkpoint --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_0_psnr.pth
 ```
 
 ```bash
@@ -165,10 +165,47 @@ python train_dcvc_sq_2to7_data.py \
   --batch_size 4 \
   --lr_scheduler plateau \
   --lr_patience 3 \
-  --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_0_psnr.pth \
+  --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_1_psnr.pth \
   --cuda_device 2
 ```
 
+```bash
+python train_dcvc_sq_2to7_data_accu.py \
+  --vimeo_dir /data/zhan5096/Project/dataset/Vimeo90k/vimeo_septuplet/sequences \
+  --septuplet_list /data/zhan5096/Project/dataset/Vimeo90k/vimeo_septuplet/sep_trainlist.txt \
+  --uvg_dir /data/zhan5096/Project/dataset/UVG/png_sequences \
+  --i_frame_model_path checkpoints/cheng2020-anchor-4-98b0b468.pth.tar \
+  --lambda_value 512 \
+  --quality_index 1 \
+  --stage 1 \
+  --epochs 20 \
+  --model_type psnr \
+  --batch_size 4 \
+  --lr_scheduler plateau \
+  --lr_patience 3 \
+  --spynet_from_dcvc_checkpoint checkpoints/model_dcvc_quality_1_psnr.pth \
+  --cuda_device 3
+```
+
+
+CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 train_dcvc_sq_2to7_data_pre_rs_ddp.py \
+  --vimeo_dir /data/zhan5096/Project/dataset/Vimeo90k/vimeo_septuplet/sequences \
+  --precomputed_dir /data/zhan5096/Project/dataset/Vimeo90k/vimeo_septuplet/reference_sequences \
+  --septuplet_list /data/zhan5096/Project/dataset/Vimeo90k/vimeo_septuplet/sep_trainlist.txt \
+  --uvg_dir /data/zhan5096/Project/dataset/UVG/png_sequences \
+  --i_frame_model_path /data/zhan5096/Project/OpenDCVC/DCVC-family/DCVC/checkpoints/cheng2020-anchor-3-e49be189.pth.tar \
+  --lambda_value 256 \
+  --quality_index 0 \
+  --stage 1 \
+  --epochs 20 \
+  --model_type psnr \
+  --batch_size 4 \
+  --num_workers 8 \
+  --learning_rate 2e-4 \
+  --lr_scheduler plateau \
+  --lr_patience 3 \
+  --spynet_from_dcvc_checkpoint /data/zhan5096/Project/OpenDCVC/DCVC-family/DCVC/checkpoints/model_dcvc_quality_0_psnr.pth \
+  --ddp_find_unused_parameters
 
 ```bash
 python train_dcvc_test.py \
