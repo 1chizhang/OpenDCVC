@@ -195,6 +195,16 @@ def train_one_epoch_fully_batched(model, i_frame_model, train_loader, optimizer,
             param.requires_grad = False
         for param in model.mvDecoder_part2.parameters():
             param.requires_grad = False
+        for param in model.mvpriorEncoder.parameters():
+            param.requires_grad = False
+        for param in model.mvpriorDecoder.parameters():
+            param.requires_grad = False
+        for param in model.auto_regressive_mv.parameters():
+            param.requires_grad = False
+        for param in model.entropy_parameters_mv.parameters():
+            param.requires_grad = False
+        for param in model.bitEstimator_z_mv.parameters():
+            param.requires_grad = False
     else:  # Unfreeze MV generation part in stages 1 and 4
         for param in model.opticFlow.parameters():
             param.requires_grad = True
@@ -203,6 +213,16 @@ def train_one_epoch_fully_batched(model, i_frame_model, train_loader, optimizer,
         for param in model.mvDecoder_part1.parameters():
             param.requires_grad = True
         for param in model.mvDecoder_part2.parameters():
+            param.requires_grad = True
+        for param in model.mvpriorEncoder.parameters():
+            param.requires_grad = True
+        for param in model.mvpriorDecoder.parameters():
+            param.requires_grad = True
+        for param in model.auto_regressive_mv.parameters():
+            param.requires_grad = True
+        for param in model.entropy_parameters_mv.parameters():
+            param.requires_grad = True
+        for param in model.bitEstimator_z_mv.parameters():
             param.requires_grad = True
     
     # Process batches of GOP sequences
