@@ -10,7 +10,7 @@ import torch
 import json
 import numpy as np
 from PIL import Image
-from src.models.DCVC_net_ori import DCVC_net
+from src.models.DCVC_net import DCVC_net
 from src.zoo.image import model_architectures as architectures
 import time
 from tqdm import tqdm
@@ -77,7 +77,7 @@ def encode_one(args_dict, device):
         i_frame_load_checkpoint).eval()
 
     video_net = DCVC_net()
-    load_checkpoint = torch.load(args_dict['model_path'], map_location=torch.device('cpu'))
+    load_checkpoint = torch.load(args_dict['model_path'], map_location=torch.device('cpu'))['model_state_dict']
     video_net.load_dict(load_checkpoint)
 
     video_net = video_net.to(device)
@@ -353,4 +353,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# python test_video.py   --i_frame_model_name cheng2020-anchor   --i_frame_model_path checkpoints/cheng2020-anchor-6-4c052b1a.pth.tar   --test_config dataset_config.json   --cuda true   --cuda_device 0   --worker 1   --output_json_result_path DCVC_result_psnr_quality3.json   --model_type psnr   --recon_bin_path recon_bin_folder_psnr   --model_path checkpoints/model_dcvc_quality_3_psnr.pth
+# python test_video_new.py   --i_frame_model_name cheng2020-anchor   --i_frame_model_path checkpoints/cheng2020-anchor-3-e49be189.pth.tar   --test_config dataset_config.json   --cuda true   --cuda_device 0   --worker 1   --output_json_result_path DCVC_result_psnr_1.json   --model_type psnr   --recon_bin_path recon_bin_folder_psnr   --model_path /home/yichi/Project/OpenDCVC/DCVC-family/DCVC/results/checkpoints_data_pre_rs/model_dcvc_lambda_256.0_quality_0_stage_3_latest.pth
